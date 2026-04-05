@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>人机验证</title>
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            background: #1a1a2e;
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 420px;
+            width: 90%;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+        h1 { font-size: 1.4em; margin-bottom: 8px; }
+        .subtitle { color: #888; font-size: 0.9em; margin-bottom: 24px; }
+        .cf-turnstile { display: flex; justify-content: center; margin: 20px 0; }
+        .status { margin-top: 16px; font-size: 0.9em; }
+        .status.success { color: #4caf50; }
+        .status.error { color: #f44336; }
+        .status.loading { color: #2196f3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🛡️ 人机验证</h1>
+        <p class="subtitle">请完成以下验证以获得发言权限</p>
+
+        <form id="verifyForm" method="POST" action="{{.CallbackURL}}">
+            <input type="hidden" name="uid" value="{{.UID}}">
+            <input type="hidden" name="cid" value="{{.CID}}">
+            <input type="hidden" name="ts" value="{{.TS}}">
+            <input type="hidden" name="sig" value="{{.Sig}}">
+
+            <div class="cf-turnstile"
+                 data-sitekey="{{.SiteKey}}"
+                 data-callback="onTurnstileSuccess"
+                 data-theme="dark">
+            </div>
+
+            <div id="status" class="status"></div>
+        </form>
+    </div>
+
+    <script>
+        function onTurnstileSuccess(token) {
+            const status = document.getElementById('status');
+            status.textContent = '验证中...';
+            status.className = 'status loading';
+
+            const form = document.getElementById('verifyForm');
+            const formData = new FormData(form);
+            formData.append('cf-turnstile-response', token);
+
+            fetch(form.action, {
+                method: 'POST',
+                body: formData,
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    status.textContent = '✅ 验证成功！您现在可以自由发言了。';
+                    status.className = 'status success';
+                } else {
+                    status.textContent = '❌ ' + (data.message || '验证失败，请重试');
+                    status.className = 'status error';
+                    if (typeof turnstile !== 'undefined') turnstile.reset();
+                }
+            })
+            .catch(() => {
+                status.textContent = '❌ 网络错误，请重试';
+                status.className = 'status error';
+                if (typeof turnstile !== 'undefined') turnstile.reset();
+            });
+        }
+    </script>
+</body>
+</html>

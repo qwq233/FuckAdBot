@@ -1,0 +1,43 @@
+[bot]
+# Telegram Bot Token (required)
+token = ""
+# Super admin Telegram user IDs
+admins = []
+
+[turnstile]
+enabled = true
+# Cloudflare Turnstile site key
+site_key = ""
+# Cloudflare Turnstile secret key
+secret_key = ""
+# Dedicated public hostname for verification pages. The program always uses
+# https://<domain>/verify and https://<domain>/verify/callback.
+domain = "verify.example.com"
+# HTTP server listen address (no TLS, use nginx reverse proxy)
+listen_addr = "127.0.0.1"
+# HTTP server port (customizable)
+listen_port = 8080
+# How long the verification link remains valid
+verify_timeout = "10m"
+
+[blacklist]
+# Initial blacklist words (loaded on startup)
+words = []
+
+[moderation]
+# Max unverified attempts before auto-ban
+max_warnings = 3
+# Seconds before reminder message is auto-deleted
+reminder_ttl = 30
+# Duration of each verification window after a reminder
+verify_window = "5m"
+
+[store]
+# Storage backend: "sqlite"
+type = "sqlite"
+# SQLite database file path
+sqlite_path = "./data/fuckad.db"
+# Redis settings (for future use)
+redis_addr = ""
+redis_password = ""
+redis_db = 0

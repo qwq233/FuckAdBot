@@ -1,0 +1,112 @@
+package captcha
+
+import (
+	"encoding/json"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+)
+
+type turnstileResponse struct {
+	Success  bool     `json:"success"`
+	Hostname string   `json:"hostname"`
+	Errors   []string `json:"error-codes"`
+}
+
+func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		writeJSON(w, false, "Invalid form data")
+		return
+	}
+
+	uid := r.FormValue("uid")
+	cid := r.FormValue("cid")
+	ts := r.FormValue("ts")
+	sig := r.FormValue("sig")
+	cfToken := r.FormValue("cf-turnstile-response")
+
+	if uid == "" || cid == "" || ts == "" || sig == "" || cfToken == "" {
+		writeJSON(w, false, "Missing parameters")
+		return
+	}
+
+	if !s.verifySignature(uid, cid, ts, sig) {
+		writeJSON(w, false, "Invalid signature")
+		return
+	}
+
+	tsInt, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil || time.Since(time.Unix(tsInt, 0)) > s.cfg.GetVerifyTimeout() {
+		writeJSON(w, false, "链接已过期")
+		return
+	}
+
+	// Verify Turnstile token with Cloudflare
+	ok, err := s.verifyTurnstile(cfToken, r.RemoteAddr)
+	if err != nil {
+		log.Printf("[captcha] turnstile verify error: %v", err)
+		writeJSON(w, false, "验证服务异常，请稍后重试")
+		return
+	}
+	if !ok {
+		writeJSON(w, false, "人机验证未通过，请重试")
+		return
+	}
+
+	chatID, _ := strconv.ParseInt(cid, 10, 64)
+	userID, _ := strconv.ParseInt(uid, 10, 64)
+
+	if s.onVerify != nil {
+		s.onVerify(chatID, userID)
+	}
+
+	writeJSON(w, true, "验证成功")
+}
+
+func (s *Server) verifyTurnstile(token, remoteIP string) (bool, error) {
+	resp, err := http.PostForm("https://challenges.cloudflare.com/turnstile/v0/siteverify", url.Values{
+		"secret":   {s.cfg.SecretKey},
+		"response": {token},
+		"remoteip": {remoteIP},
+	})
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	var result turnstileResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+
+	if !result.Success {
+		log.Printf("[captcha] turnstile rejected: errors=%v", result.Errors)
+		return false, nil
+	}
+
+	// Optionally verify hostname
+	if s.cfg.Domain != "" && result.Hostname != s.cfg.Domain {
+		log.Printf("[captcha] hostname mismatch: expected %s, got %s", s.cfg.Domain, result.Hostname)
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func writeJSON(w http.ResponseWriter, success bool, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	if !success {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": success,
+		"message": message,
+	})
+}
