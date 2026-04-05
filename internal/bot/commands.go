@@ -313,8 +313,8 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	args := ctx.Args()
-	if len(args) > 0 && strings.HasPrefix(args[0], verificationStartPayloadPrefix+"_") {
-		return b.handleVerificationStart(bot, msg, args[0])
+	if len(args) > 1 && strings.HasPrefix(args[1], verificationStartPayloadPrefix+"_") {
+		return b.handleVerificationStart(bot, msg, args[1])
 	}
 
 	bot.SendMessage(msg.Chat.Id,
