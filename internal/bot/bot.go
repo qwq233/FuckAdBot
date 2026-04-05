@@ -48,7 +48,10 @@ func (b *Bot) Start() error {
 		},
 	})
 
-	updater := ext.NewUpdater(dispatcher, nil)
+	updaterErrors := newUpdaterErrorThrottler()
+	updater := ext.NewUpdater(dispatcher, &ext.UpdaterOpts{
+		UnhandledErrFunc: updaterErrors.Handle,
+	})
 
 	// Register command handlers (higher priority)
 	dispatcher.AddHandler(handlers.NewCommand("addblocklist", b.cmdAddBlocklist))
@@ -67,7 +70,10 @@ func (b *Bot) Start() error {
 	log.Printf("[bot] Starting polling...")
 	err := updater.StartPolling(b.Bot, &ext.PollingOpts{
 		GetUpdatesOpts: &gotgbot.GetUpdatesOpts{
-			Timeout:        10,
+			Timeout: pollingGetUpdatesTimeoutSeconds,
+			RequestOpts: &gotgbot.RequestOpts{
+				Timeout: pollingRequestTimeout,
+			},
 			AllowedUpdates: []string{"message", "callback_query"},
 		},
 	})
