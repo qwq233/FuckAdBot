@@ -108,6 +108,7 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 			})
 			return nil
 		}
+		log.Printf("[bot] manual approve via callback: admin=%d target=%d chat=%d", cq.From.Id, userID, chatID)
 		messageText = fmt.Sprintf("✅ 已由管理员批准用户 <code>%d</code> 的验证", userID)
 		answerText = "已批准"
 	case "r":
@@ -119,6 +120,7 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 			})
 			return nil
 		}
+		log.Printf("[bot] manual reject via callback: admin=%d target=%d chat=%d", cq.From.Id, userID, chatID)
 		messageText = fmt.Sprintf("🚫 已由管理员拒绝用户 <code>%d</code> 的验证，其消息将被静默删除", userID)
 		answerText = "已拒绝"
 	}
@@ -132,6 +134,8 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 		})
 		if err != nil {
 			log.Printf("[bot] edit reminder message after callback error: %v", err)
+		} else {
+			scheduleMessageDeletion(bot, cq.Message.GetChat().Id, cq.Message.GetMessageId(), manualModerationResultTTL, "manual moderation result")
 		}
 	}
 

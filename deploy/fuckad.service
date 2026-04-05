@@ -1,0 +1,151 @@
+# /etc/systemd/system/fuckad.service
+#
+# ── Deployment steps ────────────────────────────────────────────────────────
+#
+#  1. Build the binary:
+#       go build -o /path/to/bot/bot ./cmd/bot/
+#
+#  2. Make files readable by the DynamicUser (ephemeral UID has no ownership):
+#       chmod 755 /path/to/bot
+#       chmod 755 /path/to/bot/bot
+#       chmod 640 /path/to/bot/config.toml
+#       # config.toml contains secrets; keep it group-readable at most.
+#       # If you tighten to 600, ensure the ephemeral user can still read it
+#       # via an ACL:
+#       #   setfacl -m u:fuckad:r /path/to/bot/config.toml
+#       # (Because DynamicUser picks a random UID, world-readable 644 is the
+#       # practical approach for a file that is already protected by the host
+#       # filesystem permissions and ProtectSystem=strict.)
+#
+#  3. Update config.toml — change sqlite_path to the StateDirectory absolute path:
+#       sqlite_path = "/var/lib/fuckad/fuckad.db"
+#     systemd will create /var/lib/fuckad/ and own it with the dynamic UID.
+#
+#  4. Install and start the unit:
+#       sudo cp deploy/fuckad.service /etc/systemd/system/
+#       sudo systemctl daemon-reload
+#       sudo systemctl enable --now fuckad
+#
+#  5. Verify:
+#       sudo systemctl status fuckad
+#       sudo journalctl -u fuckad -f
+#       sudo systemd-analyze security fuckad.service
+#
+#  6. Turnstile (captcha) reverse proxy:
+#     The HTTP server listens on 127.0.0.1:8080 (configurable via config.toml).
+#     Expose it via nginx/caddy on HTTPS; example nginx location:
+#       location /verify { proxy_pass http://127.0.0.1:8080; }
+#       location /verify/callback { proxy_pass http://127.0.0.1:8080; }
+#
+# ────────────────────────────────────────────────────────────────────────────
+
+[Unit]
+Description=FuckAd Telegram Anti-Spam Bot
+Documentation=https://github.com/qwq233/fuckadbot
+# Start only after the network stack is fully up (required for Telegram API).
+After=network-online.target
+Wants=network-online.target
+# At most 3 restart attempts in 60 s to avoid a crash loop hammering the system.
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/path/to/bot/bot
+# config.toml is resolved relative to the working directory (hardcoded in main.go).
+WorkingDirectory=/path/to/bot
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+# DynamicUser allocates a fresh ephemeral UID/GID at every start.
+# No persistent system user is needed.
+DynamicUser=yes
+# StateDirectory creates /var/lib/fuckad/, sets ownership to the dynamic UID,
+# and automatically grants read-write access under ProtectSystem=strict.
+# Set sqlite_path = "/var/lib/fuckad/fuckad.db" in config.toml.
+StateDirectory=fuckad
+
+# ── Restart policy ────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5s
+
+# ── Shutdown ──────────────────────────────────────────────────────────────────
+# The application has no signal/shutdown handler; the process is forcefully
+# terminated after TimeoutStopSec.  SQLite uses WAL mode by default so abrupt
+# termination is safe.
+TimeoutStopSec=10s
+KillMode=mixed
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fuckad
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║                        SANDBOX CONFIGURATION                            ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── Filesystem isolation ──────────────────────────────────────────────────────
+# Give the service its own private /tmp and /var/tmp namespaces.
+PrivateTmp=yes
+# Mount the entire filesystem tree read-only for this service.
+# /dev, /proc, /sys and /run are exempted by systemd automatically.
+# /var/lib/fuckad (StateDirectory) is the only writable path thanks to
+# DynamicUser + StateDirectory — no manual ReadWritePaths entry is required.
+ProtectSystem=strict
+# Prevent access to real home directories.
+ProtectHome=yes
+
+# ── Kernel and hardware ───────────────────────────────────────────────────────
+# Block access to /dev (virtual devices only via PrivateDevices set below).
+PrivateDevices=yes
+# Disallow modifications to kernel variables (/proc/sys, /sys).
+ProtectKernelTunables=yes
+# Prevent loading kernel modules.
+ProtectKernelModules=yes
+# Hide the kernel log ring buffer (/dev/kmsg, /proc/kmsg).
+ProtectKernelLogs=yes
+# Deny write access to the cgroup hierarchy.
+ProtectControlGroups=yes
+
+# ── Privilege escalation prevention ──────────────────────────────────────────
+# No execve() call may gain new privileges via setuid/setgid bits.
+NoNewPrivileges=yes
+# Block setuid/setgid bit creation on new files.
+RestrictSUIDSGID=yes
+# Drop all Linux capabilities.  Turnstile listens on port 8080 (unprivileged),
+# so CAP_NET_BIND_SERVICE is not required.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# ── Namespace and personality restrictions ────────────────────────────────────
+# Allow only the address families the bot actually uses:
+#   AF_UNIX  — Go runtime internal sockets
+#   AF_INET  — Telegram Bot API (HTTPS) and Turnstile HTTP listener
+#   AF_INET6 — dual-stack support for the above
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Block creation of any namespace other than those systemd itself manages.
+RestrictNamespaces=yes
+# Prevent the service from changing its execution domain (personality).
+LockPersonality=yes
+
+# ── Memory execution control ──────────────────────────────────────────────────
+# Standard Go production builds do not require writable+executable memory.
+# NOTE: remove this line if the binary is compiled with -race or uses CGO
+# plugins that allocate JIT code.
+MemoryDenyWriteExecute=yes
+
+# ── IPC ───────────────────────────────────────────────────────────────────────
+# Remove all System V and POSIX message queues, semaphores and shared memory
+# segments owned by the service on exit.
+RemoveIPC=yes
+
+# ── Syscall filter ────────────────────────────────────────────────────────────
+# Allow only syscalls appropriate for a regular service process; deny the rest
+# with EPERM instead of SIGSYS to avoid crashing on unexpected calls.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Reject syscalls for foreign ABIs (e.g. 32-bit on a 64-bit kernel).
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

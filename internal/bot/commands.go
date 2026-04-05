@@ -280,12 +280,18 @@ func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 		})
 		return nil
 	}
+	log.Printf("[bot] manual approve via command: admin=%d target=%d chat=%d", msg.From.Id, userID, chatID)
 
 	reply := fmt.Sprintf("✅ 已批准用户 <code>%d</code> 的验证", userID)
-	bot.SendMessage(chatID, reply, &gotgbot.SendMessageOpts{
+	resp, err := bot.SendMessage(chatID, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
 	})
+	if err != nil {
+		log.Printf("[bot] send approve confirmation error: %v", err)
+		return nil
+	}
+	scheduleMessageDeletion(bot, chatID, resp.MessageId, manualModerationResultTTL, "approve confirmation")
 
 	return nil
 }
@@ -318,12 +324,18 @@ func (b *Bot) cmdReject(bot *gotgbot.Bot, ctx *ext.Context) error {
 		})
 		return nil
 	}
+	log.Printf("[bot] manual reject via command: admin=%d target=%d chat=%d", msg.From.Id, userID, chatID)
 
 	reply := fmt.Sprintf("🚫 已拒绝用户 <code>%d</code> 的验证，其消息将被静默删除", userID)
-	bot.SendMessage(chatID, reply, &gotgbot.SendMessageOpts{
+	resp, err := bot.SendMessage(chatID, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
 	})
+	if err != nil {
+		log.Printf("[bot] send reject confirmation error: %v", err)
+		return nil
+	}
+	scheduleMessageDeletion(bot, chatID, resp.MessageId, manualModerationResultTTL, "reject confirmation")
 
 	return nil
 }
@@ -404,7 +416,6 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	bot.SendMessage(msg.Chat.Id,
-		"👋 欢迎使用 FuckAd 反广告机器人。\n\n"+
 			"如果您需要完成人机验证，请点击群组中发送给您的验证链接。\n\n"+
 			"<b>管理员命令:</b>\n"+
 			"/addblocklist &lt;词汇&gt; - 添加黑名单\n"+

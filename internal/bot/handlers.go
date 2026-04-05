@@ -174,12 +174,7 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	// Keep the reminder visible for the full verification window unless configured longer.
 	reminderTTL := b.Config.Moderation.GetReminderTTL()
-	reminderMsgID := reminderMsg.MessageId
-	time.AfterFunc(reminderTTL, func() {
-		if _, err := bot.DeleteMessage(chatID, reminderMsgID, nil); err != nil {
-			// Ignore: message may already be deleted
-		}
-	})
+	scheduleMessageDeletion(bot, chatID, reminderMsg.MessageId, reminderTTL, "verification reminder")
 
 	// Schedule verification window expiry check
 	capturedUserID := user.Id

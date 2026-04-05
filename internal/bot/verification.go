@@ -3,8 +3,6 @@ package bot
 import (
 	"fmt"
 	"log"
-	"strings"
-	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 )
@@ -42,9 +40,5 @@ func (b *Bot) HandleVerificationSuccess(chatID, userID int64) {
 		return
 	}
 
-	time.AfterFunc(15*time.Second, func() {
-		if _, err := b.Bot.DeleteMessage(userID, successMsg.MessageId, nil); err != nil && !strings.Contains(strings.ToLower(err.Error()), "message to delete not found") {
-			log.Printf("[bot] delete verification success private message error: %v", err)
-		}
-	})
+	scheduleMessageDeletion(b.Bot, userID, successMsg.MessageId, manualModerationResultTTL, "verification success private")
 }
