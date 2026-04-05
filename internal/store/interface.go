@@ -36,8 +36,9 @@ type Store interface {
 	IncrWarningCount(chatID, userID int64) (int, error) // returns new count
 	ResetWarningCount(chatID, userID int64) error
 
-	// Blacklist words
-	GetBlacklistWords() ([]string, error)
-	AddBlacklistWord(word, addedBy string) error
-	RemoveBlacklistWord(word string) error
+	// Blacklist words (chatID=0 for global, specific chatID for group-scoped)
+	GetBlacklistWords(chatID int64) ([]string, error)
+	AddBlacklistWord(chatID int64, word, addedBy string) error
+	RemoveBlacklistWord(chatID int64, word string) error
+	GetAllBlacklistWords() (map[int64][]string, error)
 }

@@ -12,20 +12,29 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 )
 
-// isAdmin checks if the user is a bot-level admin (from config) or a group admin/creator.
-func (b *Bot) isAdmin(bot *gotgbot.Bot, chatID, userID int64) bool {
+// isBotAdmin checks if the user is a bot-level admin (from config).
+func (b *Bot) isBotAdmin(userID int64) bool {
 	for _, id := range b.Config.Bot.Admins {
 		if id == userID {
 			return true
 		}
 	}
+	return false
+}
 
+// isGroupAdmin checks if the user is a group admin/creator via Telegram API.
+func (b *Bot) isGroupAdmin(bot *gotgbot.Bot, chatID, userID int64) bool {
 	member, err := bot.GetChatMember(chatID, userID, nil)
 	if err != nil {
 		return false
 	}
 	status := member.MergeChatMember().Status
 	return status == "administrator" || status == "creator"
+}
+
+// isAdmin checks if the user is a bot-level admin or a group admin/creator.
+func (b *Bot) isAdmin(bot *gotgbot.Bot, chatID, userID int64) bool {
+	return b.isBotAdmin(userID) || b.isGroupAdmin(bot, chatID, userID)
 }
 
 // extractTargetUserID gets a user ID from command args or reply_to_message.
@@ -51,8 +60,15 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
-		return nil
+	isPrivate := msg.Chat.Type == "private"
+	if isPrivate {
+		if !b.isBotAdmin(msg.From.Id) {
+			return nil
+		}
+	} else {
+		if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
+			return nil
+		}
 	}
 
 	args := strings.Fields(msg.Text)
@@ -71,16 +87,32 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	b.Blacklist.Add(word)
-	if err := b.Store.AddBlacklistWord(word, strconv.FormatInt(msg.From.Id, 10)); err != nil {
+	var scopeChatID int64
+	var scopeLabel string
+	if isPrivate {
+		scopeChatID = 0
+		scopeLabel = "全局"
+		b.Blacklist.Add(word)
+	} else {
+		scopeChatID = msg.Chat.Id
+		scopeLabel = "群组"
+		b.Blacklist.AddGroup(scopeChatID, word)
+	}
+
+	if err := b.Store.AddBlacklistWord(scopeChatID, word, strconv.FormatInt(msg.From.Id, 10)); err != nil {
 		log.Printf("[bot] store.AddBlacklistWord error: %v", err)
+		if isPrivate {
+			b.Blacklist.Remove(word)
+		} else {
+			b.Blacklist.RemoveGroup(scopeChatID, word)
+		}
 		bot.SendMessage(msg.Chat.Id, "❌ 持久化黑名单词汇失败", &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
 	}
 
-	reply := fmt.Sprintf("✅ 已添加黑名单词汇: <code>%s</code>", escapeHTML(word))
+	reply := fmt.Sprintf("✅ 已添加%s黑名单词汇: <code>%s</code>", scopeLabel, escapeHTML(word))
 	bot.SendMessage(msg.Chat.Id, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
@@ -95,8 +127,15 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
-		return nil
+	isPrivate := msg.Chat.Type == "private"
+	if isPrivate {
+		if !b.isBotAdmin(msg.From.Id) {
+			return nil
+		}
+	} else {
+		if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
+			return nil
+		}
 	}
 
 	args := strings.Fields(msg.Text)
@@ -115,23 +154,42 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	if !b.Blacklist.Remove(word) {
-		bot.SendMessage(msg.Chat.Id, "❌ 未找到该黑名单词汇", &gotgbot.SendMessageOpts{
-			MessageThreadId: msg.MessageThreadId,
-		})
-		return nil
+	var scopeChatID int64
+	var scopeLabel string
+	if isPrivate {
+		scopeChatID = 0
+		scopeLabel = "全局"
+		if !b.Blacklist.Remove(word) {
+			bot.SendMessage(msg.Chat.Id, "❌ 未找到该全局黑名单词汇", &gotgbot.SendMessageOpts{
+				MessageThreadId: msg.MessageThreadId,
+			})
+			return nil
+		}
+	} else {
+		scopeChatID = msg.Chat.Id
+		scopeLabel = "群组"
+		if !b.Blacklist.RemoveGroup(scopeChatID, word) {
+			bot.SendMessage(msg.Chat.Id, "❌ 未找到该群组黑名单词汇", &gotgbot.SendMessageOpts{
+				MessageThreadId: msg.MessageThreadId,
+			})
+			return nil
+		}
 	}
 
-	if err := b.Store.RemoveBlacklistWord(word); err != nil {
+	if err := b.Store.RemoveBlacklistWord(scopeChatID, word); err != nil {
 		log.Printf("[bot] store.RemoveBlacklistWord error: %v", err)
-		b.Blacklist.Add(word)
+		if isPrivate {
+			b.Blacklist.Add(word)
+		} else {
+			b.Blacklist.AddGroup(scopeChatID, word)
+		}
 		bot.SendMessage(msg.Chat.Id, "❌ 从数据库删除黑名单词汇失败", &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
 	}
 
-	reply := fmt.Sprintf("✅ 已移除黑名单词汇: <code>%s</code>", escapeHTML(word))
+	reply := fmt.Sprintf("✅ 已移除%s黑名单词汇: <code>%s</code>", scopeLabel, escapeHTML(word))
 	bot.SendMessage(msg.Chat.Id, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
@@ -146,20 +204,42 @@ func (b *Bot) cmdListBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
-		return nil
+	isPrivate := msg.Chat.Type == "private"
+	if isPrivate {
+		if !b.isBotAdmin(msg.From.Id) {
+			return nil
+		}
+	} else {
+		if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
+			return nil
+		}
 	}
 
-	words := b.Blacklist.List()
+	var words []string
+	var title string
+	if isPrivate {
+		words = b.Blacklist.List()
+		title = "📋 <b>全局黑名单词汇列表:</b>\n"
+	} else {
+		words = b.Blacklist.ListGroup(msg.Chat.Id)
+		title = "📋 <b>群组黑名单词汇列表:</b>\n"
+	}
+
 	if len(words) == 0 {
-		bot.SendMessage(msg.Chat.Id, "黑名单为空", &gotgbot.SendMessageOpts{
-			MessageThreadId: msg.MessageThreadId,
-		})
+		if isPrivate {
+			bot.SendMessage(msg.Chat.Id, "全局黑名单为空", &gotgbot.SendMessageOpts{
+				MessageThreadId: msg.MessageThreadId,
+			})
+		} else {
+			bot.SendMessage(msg.Chat.Id, "群组黑名单为空", &gotgbot.SendMessageOpts{
+				MessageThreadId: msg.MessageThreadId,
+			})
+		}
 		return nil
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📋 <b>黑名单词汇列表:</b>\n")
+	sb.WriteString(title)
 	for i, w := range words {
 		sb.WriteString(fmt.Sprintf("%d. <code>%s</code>\n", i+1, escapeHTML(w)))
 	}
@@ -297,7 +377,13 @@ func (b *Bot) cmdStats(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	words := b.Blacklist.List()
-	reply := fmt.Sprintf("📊 <b>统计信息</b>\n黑名单词汇数: %d", len(words))
+	var reply string
+	if msg.Chat.Type == "private" {
+		reply = fmt.Sprintf("📊 <b>统计信息</b>\n全局黑名单词汇数: %d", len(words))
+	} else {
+		groupWords := b.Blacklist.ListGroup(msg.Chat.Id)
+		reply = fmt.Sprintf("📊 <b>统计信息</b>\n全局黑名单词汇数: %d\n群组黑名单词汇数: %d", len(words), len(groupWords))
+	}
 	bot.SendMessage(msg.Chat.Id, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
@@ -362,7 +448,7 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 		checkText += " " + chat.Bio
 	}
 
-	if matched := b.Blacklist.Match(checkText); matched != "" {
+	if matched := b.Blacklist.MatchWithGroup(chatID, checkText); matched != "" {
 		log.Printf("[bot] blacklist hit during /start verification: user=%d word=%q in chat=%d", userID, matched, chatID)
 		if err := b.Store.ClearPending(chatID, userID); err != nil {
 			log.Printf("[bot] store.ClearPending error after blacklist hit in /start: %v", err)

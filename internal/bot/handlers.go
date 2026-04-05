@@ -26,6 +26,11 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	user := msg.From
 	chatID := msg.Chat.Id
 
+	// --- Bot admins bypass all checks ---
+	if b.isBotAdmin(user.Id) {
+		return nil
+	}
+
 	// --- Blacklist check (every message, including verified users) ---
 	checkText := buildCheckText(user)
 
@@ -36,7 +41,11 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		}
 	}
 
-	if matched := b.Blacklist.Match(checkText); matched != "" {
+	if matched := b.Blacklist.MatchWithGroup(chatID, checkText); matched != "" {
+		// Don't ban group admins
+		if b.isGroupAdmin(bot, chatID, user.Id) {
+			return nil
+		}
 		log.Printf("[bot] blacklist hit: user=%d word=%q in chat=%d", user.Id, matched, chatID)
 		bot.DeleteMessage(chatID, msg.MessageId, nil)
 		bot.BanChatMember(chatID, user.Id, &gotgbot.BanChatMemberOpts{})
@@ -51,6 +60,14 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 	if verified {
 		return nil // Verified user, allow message
+	}
+
+	// --- Auto-approve group admins ---
+	if b.isGroupAdmin(bot, chatID, user.Id) {
+		if err := b.approveUser(chatID, user.Id); err != nil {
+			log.Printf("[bot] auto-approve group admin error: %v", err)
+		}
+		return nil
 	}
 
 	// Check if rejected by admin

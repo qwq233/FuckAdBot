@@ -36,16 +36,24 @@ func main() {
 
 	// Initialize blacklist
 	bl := blacklist.New()
-	// Load from config file
+	// Load from config file (global)
 	bl.Load(cfg.Blacklist.Words)
-	// Load from store (runtime-added words)
-	dbWords, err := st.GetBlacklistWords()
+	// Load from store (runtime-added words, both global and group-scoped)
+	allWords, err := st.GetAllBlacklistWords()
 	if err != nil {
 		log.Printf("[main] Warning: failed to load blacklist from store: %v", err)
 	} else {
-		bl.Load(dbWords)
+		if globalWords, ok := allWords[0]; ok {
+			bl.Load(globalWords)
+		}
+		for chatID, words := range allWords {
+			if chatID == 0 {
+				continue
+			}
+			bl.LoadGroup(chatID, words)
+		}
 	}
-	log.Printf("[main] Blacklist loaded (%d words)", len(bl.List()))
+	log.Printf("[main] Blacklist loaded (%d global words)", len(bl.List()))
 
 	// Create bot instance (needed for captcha callback)
 	b, err := bot.New(cfg, st, bl, nil)

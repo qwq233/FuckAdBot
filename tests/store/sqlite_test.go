@@ -19,11 +19,11 @@ func TestSQLiteStoreBlacklistWordsNormalized(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.AddBlacklistWord("  SpAmWord  ", "admin"); err != nil {
+	if err := store.AddBlacklistWord(0, "  SpAmWord  ", "admin"); err != nil {
 		t.Fatalf("AddBlacklistWord() error = %v", err)
 	}
 
-	words, err := store.GetBlacklistWords()
+	words, err := store.GetBlacklistWords(0)
 	if err != nil {
 		t.Fatalf("GetBlacklistWords() error = %v", err)
 	}
@@ -54,17 +54,17 @@ func TestSQLiteStoreRemoveBlacklistWordCaseInsensitive(t *testing.T) {
 	defer rawDB.Close()
 
 	if _, err := rawDB.Exec(
-		`INSERT INTO blacklist_words (word, added_by, added_at) VALUES (?, ?, datetime('now'))`,
-		"MiXeDCaSe", "admin",
+		`INSERT INTO blacklist_words (chat_id, word, added_by, added_at) VALUES (?, ?, ?, datetime('now'))`,
+		0, "MiXeDCaSe", "admin",
 	); err != nil {
 		t.Fatalf("seed mixed-case row error = %v", err)
 	}
 
-	if err := store.RemoveBlacklistWord("mixedcase"); err != nil {
+	if err := store.RemoveBlacklistWord(0, "mixedcase"); err != nil {
 		t.Fatalf("RemoveBlacklistWord() error = %v", err)
 	}
 
-	words, err := store.GetBlacklistWords()
+	words, err := store.GetBlacklistWords(0)
 	if err != nil {
 		t.Fatalf("GetBlacklistWords() error = %v", err)
 	}
@@ -113,5 +113,48 @@ func TestSQLiteStorePendingVerificationRoundTrip(t *testing.T) {
 
 	if !got.ExpireAt.Equal(want.ExpireAt) {
 		t.Fatalf("ExpireAt = %v, want %v", got.ExpireAt, want.ExpireAt)
+	}
+}
+
+func TestSQLiteStoreGroupScopedBlacklist(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	// Add global word
+	if err := store.AddBlacklistWord(0, "globalword", "admin"); err != nil {
+		t.Fatalf("AddBlacklistWord(global) error = %v", err)
+	}
+	// Add group word
+	if err := store.AddBlacklistWord(-100123, "groupword", "admin"); err != nil {
+		t.Fatalf("AddBlacklistWord(group) error = %v", err)
+	}
+
+	globalWords, err := store.GetBlacklistWords(0)
+	if err != nil {
+		t.Fatalf("GetBlacklistWords(0) error = %v", err)
+	}
+	if len(globalWords) != 1 || globalWords[0] != "globalword" {
+		t.Fatalf("GetBlacklistWords(0) = %v, want [globalword]", globalWords)
+	}
+
+	groupWords, err := store.GetBlacklistWords(-100123)
+	if err != nil {
+		t.Fatalf("GetBlacklistWords(-100123) error = %v", err)
+	}
+	if len(groupWords) != 1 || groupWords[0] != "groupword" {
+		t.Fatalf("GetBlacklistWords(-100123) = %v, want [groupword]", groupWords)
+	}
+
+	all, err := store.GetAllBlacklistWords()
+	if err != nil {
+		t.Fatalf("GetAllBlacklistWords() error = %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("GetAllBlacklistWords() returned %d scopes, want 2", len(all))
 	}
 }

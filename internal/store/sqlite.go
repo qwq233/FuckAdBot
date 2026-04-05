@@ -63,9 +63,11 @@ func (s *SQLiteStore) migrate() error {
 			PRIMARY KEY (chat_id, user_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS blacklist_words (
-			word     TEXT PRIMARY KEY,
+			chat_id  INTEGER NOT NULL DEFAULT 0,
+			word     TEXT NOT NULL,
 			added_by TEXT NOT NULL DEFAULT '',
-			added_at DATETIME NOT NULL DEFAULT (datetime('now'))
+			added_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (chat_id, word)
 		)`,
 	}
 
@@ -76,6 +78,9 @@ func (s *SQLiteStore) migrate() error {
 	}
 
 	if err := s.ensurePendingVerificationColumns(); err != nil {
+		return err
+	}
+	if err := s.migrateBlacklistTable(); err != nil {
 		return err
 	}
 	return nil
@@ -305,8 +310,70 @@ func (s *SQLiteStore) ResetWarningCount(chatID, userID int64) error {
 
 // --- Blacklist ---
 
-func (s *SQLiteStore) GetBlacklistWords() ([]string, error) {
-	rows, err := s.db.Query(`SELECT word FROM blacklist_words`)
+func (s *SQLiteStore) migrateBlacklistTable() error {
+	rows, err := s.db.Query(`PRAGMA table_info(blacklist_words)`)
+	if err != nil {
+		return fmt.Errorf("pragma blacklist_words: %w", err)
+	}
+	defer rows.Close()
+
+	hasChatID := false
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			dataType  string
+			notNull   int
+			defaultV  sql.NullString
+			primaryPK int
+		)
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultV, &primaryPK); err != nil {
+			return fmt.Errorf("scan blacklist_words columns: %w", err)
+		}
+		if name == "chat_id" {
+			hasChatID = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate blacklist_words columns: %w", err)
+	}
+
+	if hasChatID {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin blacklist migration tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	migrationQueries := []string{
+		`CREATE TABLE blacklist_words_new (
+			chat_id  INTEGER NOT NULL DEFAULT 0,
+			word     TEXT NOT NULL,
+			added_by TEXT NOT NULL DEFAULT '',
+			added_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (chat_id, word)
+		)`,
+		`INSERT INTO blacklist_words_new (chat_id, word, added_by, added_at)
+		 SELECT 0, word, added_by, added_at FROM blacklist_words`,
+		`DROP TABLE blacklist_words`,
+		`ALTER TABLE blacklist_words_new RENAME TO blacklist_words`,
+	}
+
+	for _, q := range migrationQueries {
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("migrate blacklist_words: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) GetBlacklistWords(chatID int64) ([]string, error) {
+	rows, err := s.db.Query(`SELECT word FROM blacklist_words WHERE chat_id = ?`, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -323,28 +390,47 @@ func (s *SQLiteStore) GetBlacklistWords() ([]string, error) {
 	return words, rows.Err()
 }
 
-func (s *SQLiteStore) AddBlacklistWord(word, addedBy string) error {
+func (s *SQLiteStore) AddBlacklistWord(chatID int64, word, addedBy string) error {
 	normalized := normalizeBlacklistWord(word)
 	if normalized == "" {
 		return fmt.Errorf("blacklist word cannot be empty")
 	}
 
 	_, err := s.db.Exec(
-		`INSERT INTO blacklist_words (word, added_by, added_at) VALUES (?, ?, datetime('now'))
-		 ON CONFLICT(word) DO NOTHING`,
-		normalized, addedBy,
+		`INSERT INTO blacklist_words (chat_id, word, added_by, added_at) VALUES (?, ?, ?, datetime('now'))
+		 ON CONFLICT(chat_id, word) DO NOTHING`,
+		chatID, normalized, addedBy,
 	)
 	return err
 }
 
-func (s *SQLiteStore) RemoveBlacklistWord(word string) error {
+func (s *SQLiteStore) RemoveBlacklistWord(chatID int64, word string) error {
 	normalized := normalizeBlacklistWord(word)
 	if normalized == "" {
 		return fmt.Errorf("blacklist word cannot be empty")
 	}
 
-	_, err := s.db.Exec(`DELETE FROM blacklist_words WHERE lower(trim(word)) = ?`, normalized)
+	_, err := s.db.Exec(`DELETE FROM blacklist_words WHERE chat_id = ? AND lower(trim(word)) = ?`, chatID, normalized)
 	return err
+}
+
+func (s *SQLiteStore) GetAllBlacklistWords() (map[int64][]string, error) {
+	rows, err := s.db.Query(`SELECT chat_id, word FROM blacklist_words`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64][]string)
+	for rows.Next() {
+		var chatID int64
+		var w string
+		if err := rows.Scan(&chatID, &w); err != nil {
+			return nil, err
+		}
+		result[chatID] = append(result[chatID], w)
+	}
+	return result, rows.Err()
 }
 
 func normalizeBlacklistWord(word string) string {
