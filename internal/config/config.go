@@ -85,6 +85,20 @@ func (c *ModerationConfig) GetVerifyWindow() time.Duration {
 	return d
 }
 
+func (c *ModerationConfig) GetReminderTTL() time.Duration {
+	ttl := time.Duration(c.ReminderTTL) * time.Second
+	if ttl <= 0 {
+		return c.GetVerifyWindow()
+	}
+
+	verifyWindow := c.GetVerifyWindow()
+	if ttl < verifyWindow {
+		return verifyWindow
+	}
+
+	return ttl
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

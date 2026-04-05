@@ -2,10 +2,13 @@ package captcha
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,7 +24,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseForm(); err != nil {
+	if err := parseVerificationRequest(r); err != nil {
 		writeJSON(w, false, "Invalid form data")
 		return
 	}
@@ -49,7 +52,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify Turnstile token with Cloudflare
-	ok, err := s.verifyTurnstile(cfToken, r.RemoteAddr)
+	ok, err := s.verifyTurnstile(cfToken, extractClientIP(r))
 	if err != nil {
 		log.Printf("[captcha] turnstile verify error: %v", err)
 		writeJSON(w, false, "验证服务异常，请稍后重试")
@@ -68,6 +71,43 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, true, "验证成功")
+}
+
+func parseVerificationRequest(r *http.Request) error {
+	if err := r.ParseMultipartForm(1 << 20); err == nil {
+		return nil
+	} else if !errors.Is(err, http.ErrNotMultipart) {
+		return err
+	}
+
+	return r.ParseForm()
+}
+
+func extractClientIP(r *http.Request) string {
+	for _, header := range []string{"X-Forwarded-For", "X-Real-IP"} {
+		value := strings.TrimSpace(r.Header.Get(header))
+		if value == "" {
+			continue
+		}
+
+		if header == "X-Forwarded-For" {
+			parts := strings.Split(value, ",")
+			value = strings.TrimSpace(parts[0])
+		}
+
+		if host, _, err := net.SplitHostPort(value); err == nil {
+			return host
+		}
+
+		return value
+	}
+
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return host
+	}
+
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func (s *Server) verifyTurnstile(token, remoteIP string) (bool, error) {

@@ -110,6 +110,12 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.MessageThreadId != 0 {
 		sendOpts.MessageThreadId = msg.MessageThreadId
 	}
+	if replyTargetMessageID := reminderReplyTargetMessageID(msg); replyTargetMessageID != 0 {
+		sendOpts.ReplyParameters = &gotgbot.ReplyParameters{
+			MessageId:                replyTargetMessageID,
+			AllowSendingWithoutReply: true,
+		}
+	}
 
 	reminderMsg, err := bot.SendMessage(chatID, reminderText, sendOpts)
 	if err != nil {
@@ -124,8 +130,8 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		log.Printf("[bot] store.SetPending error: %v", err)
 	}
 
-	// Schedule reminder message deletion after reminder_ttl seconds
-	reminderTTL := time.Duration(b.Config.Moderation.ReminderTTL) * time.Second
+	// Keep the reminder visible for the full verification window unless configured longer.
+	reminderTTL := b.Config.Moderation.GetReminderTTL()
 	reminderMsgID := reminderMsg.MessageId
 	time.AfterFunc(reminderTTL, func() {
 		if _, err := bot.DeleteMessage(chatID, reminderMsgID, nil); err != nil {
@@ -184,6 +190,22 @@ func buildCheckText(user *gotgbot.User) string {
 		text += " " + user.Username
 	}
 	return text
+}
+
+func reminderReplyTargetMessageID(msg *gotgbot.Message) int64 {
+	if msg == nil {
+		return 0
+	}
+
+	if msg.MessageThreadId != 0 {
+		return msg.MessageThreadId
+	}
+
+	if msg.ReplyToMessage != nil {
+		return msg.ReplyToMessage.MessageId
+	}
+
+	return 0
 }
 
 // maskName returns the first rune of the name followed by "**".

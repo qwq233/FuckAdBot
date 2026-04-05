@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	configpkg "github.com/qwq233/fuckadbot/internal/config"
 )
@@ -79,5 +80,18 @@ func TestTurnstileURLsUseFixedPaths(t *testing.T) {
 
 	if got, want := cfg.CallbackURL(), "https://verify.example.com/verify/callback"; got != want {
 		t.Fatalf("CallbackURL() = %q, want %q", got, want)
+	}
+}
+
+func TestReminderTTLUsesAtLeastVerifyWindow(t *testing.T) {
+	t.Parallel()
+
+	cfg := configpkg.ModerationConfig{
+		ReminderTTL:  30,
+		VerifyWindow: "5m",
+	}
+
+	if got, want := cfg.GetReminderTTL(), 5*time.Minute; got != want {
+		t.Fatalf("GetReminderTTL() = %v, want %v", got, want)
 	}
 }
