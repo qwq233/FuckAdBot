@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log"
 	"time"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
+	"github.com/qwq233/fuckadbot/internal/store"
 )
 
 func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
@@ -92,8 +94,12 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	// Generate verification URL
-	verifyURL := b.Captcha.GenerateVerifyURL(chatID, user.Id)
+	timestamp := time.Now().UTC().Unix()
+	randomToken, err := newVerificationRandomToken(7)
+	if err != nil {
+		log.Printf("[bot] generate verification random token error: %v", err)
+		return nil
+	}
 
 	// Build reminder message with hidden username
 	maskedName := maskName(user.FirstName)
@@ -104,8 +110,7 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	// Send reminder in the same comment thread
 	sendOpts := &gotgbot.SendMessageOpts{
-		ParseMode:   "HTML",
-		ReplyMarkup: BuildReminderKeyboard(verifyURL, chatID, user.Id),
+		ParseMode: "HTML",
 	}
 	if msg.MessageThreadId != 0 {
 		sendOpts.MessageThreadId = msg.MessageThreadId
@@ -125,9 +130,29 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	// Record pending verification window
 	verifyWindow := b.Config.Moderation.GetVerifyWindow()
-	expireAt := time.Now().Add(verifyWindow)
-	if err := b.Store.SetPending(chatID, user.Id, expireAt); err != nil {
+	expireAt := time.Unix(timestamp, 0).UTC().Add(verifyWindow)
+	if err := b.Store.SetPending(store.PendingVerification{
+		ChatID:            chatID,
+		UserID:            user.Id,
+		Timestamp:         timestamp,
+		RandomToken:       randomToken,
+		ExpireAt:          expireAt,
+		ReminderMessageID: reminderMsg.MessageId,
+		MessageThreadID:   msg.MessageThreadId,
+		ReplyToMessageID:  reminderReplyTargetMessageID(msg),
+	}); err != nil {
 		log.Printf("[bot] store.SetPending error: %v", err)
+		if _, err := bot.DeleteMessage(chatID, reminderMsg.MessageId, nil); err != nil {
+			log.Printf("[bot] delete reminder message after pending persist failure: %v", err)
+		}
+		return nil
+	}
+
+	verificationStartURL := BuildVerificationStartURL(bot.Username, chatID, user.Id, reminderMsg.MessageId)
+	if _, _, err := reminderMsg.EditReplyMarkup(bot, &gotgbot.EditMessageReplyMarkupOpts{
+		ReplyMarkup: BuildReminderKeyboard(verificationStartURL, chatID, user.Id),
+	}); err != nil {
+		log.Printf("[bot] edit reminder message reply markup error: %v", err)
 	}
 
 	// Keep the reminder visible for the full verification window unless configured longer.
@@ -206,6 +231,25 @@ func reminderReplyTargetMessageID(msg *gotgbot.Message) int64 {
 	}
 
 	return 0
+}
+
+func newVerificationRandomToken(length int) (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	if length <= 0 {
+		return "", fmt.Errorf("verification random token length must be positive")
+	}
+
+	randomBytes := make([]byte, length)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+
+	token := make([]byte, length)
+	for index, randomByte := range randomBytes {
+		token[index] = alphabet[int(randomByte)%len(alphabet)]
+	}
+
+	return string(token), nil
 }
 
 // maskName returns the first rune of the name followed by "**".

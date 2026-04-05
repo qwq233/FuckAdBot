@@ -56,13 +56,9 @@ func main() {
 	// Initialize captcha server with verification callback
 	var cs *captcha.Server
 	if cfg.Turnstile.Enabled {
-		cs = captcha.NewServer(&cfg.Turnstile, cfg.Bot.Token, func(chatID, userID int64) {
+		cs = captcha.NewServer(&cfg.Turnstile, st, cfg.Moderation.GetVerifyWindow(), cfg.Bot.Token, func(chatID, userID int64) {
 			log.Printf("[captcha] User %d verified in chat %d", userID, chatID)
-			if err := st.SetVerified(chatID, userID); err != nil {
-				log.Printf("[captcha] store.SetVerified error: %v", err)
-			}
-			st.ClearPending(chatID, userID)
-			st.ResetWarningCount(chatID, userID)
+			b.HandleVerificationSuccess(chatID, userID)
 		})
 		b.Captcha = cs
 

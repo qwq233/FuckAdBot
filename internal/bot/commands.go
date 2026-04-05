@@ -6,6 +6,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
@@ -311,6 +312,11 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
+	args := ctx.Args()
+	if len(args) > 0 && strings.HasPrefix(args[0], verificationStartPayloadPrefix+"_") {
+		return b.handleVerificationStart(bot, msg, args[0])
+	}
+
 	bot.SendMessage(msg.Chat.Id,
 		"👋 欢迎使用 FuckAd 反广告机器人。\n\n"+
 			"如果您需要完成人机验证，请点击群组中发送给您的验证链接。\n\n"+
@@ -324,6 +330,74 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 			"/stats - 查看统计",
 		&gotgbot.SendMessageOpts{ParseMode: "HTML"},
 	)
+
+	return nil
+}
+
+func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, payload string) error {
+	chatID, userID, verificationInfoID, err := ParseVerificationStartPayload(payload)
+	if err != nil {
+		bot.SendMessage(msg.Chat.Id, "❌ 验证参数无效", nil)
+		return nil
+	}
+
+	if msg.From == nil || msg.From.Id != userID {
+		bot.SendMessage(msg.Chat.Id, "❌ 该验证链接不属于您", nil)
+		return nil
+	}
+
+	pending, err := b.Store.GetPending(chatID, userID)
+	if err != nil {
+		log.Printf("[bot] store.GetPending error in /start: %v", err)
+		bot.SendMessage(msg.Chat.Id, "❌ 读取验证状态失败，请稍后重试", nil)
+		return nil
+	}
+	if pending == nil || pending.ReminderMessageID != verificationInfoID || !pending.ExpireAt.After(time.Now().UTC()) {
+		bot.SendMessage(msg.Chat.Id, "❌ 该验证链接已失效，请回到群组重新触发验证", nil)
+		return nil
+	}
+
+	checkText := buildCheckText(msg.From)
+	if chat, err := bot.GetChat(userID, nil); err == nil && chat.Bio != "" {
+		checkText += " " + chat.Bio
+	}
+
+	if matched := b.Blacklist.Match(checkText); matched != "" {
+		log.Printf("[bot] blacklist hit during /start verification: user=%d word=%q in chat=%d", userID, matched, chatID)
+		if err := b.Store.ClearPending(chatID, userID); err != nil {
+			log.Printf("[bot] store.ClearPending error after blacklist hit in /start: %v", err)
+		}
+		if pending.ReminderMessageID != 0 {
+			if _, err := bot.DeleteMessage(chatID, pending.ReminderMessageID, nil); err != nil {
+				log.Printf("[bot] delete reminder message after /start blacklist hit error: %v", err)
+			}
+		}
+		if _, err := bot.BanChatMember(chatID, userID, &gotgbot.BanChatMemberOpts{}); err != nil {
+			log.Printf("[bot] ban user after /start blacklist hit error: %v", err)
+		}
+		bot.SendMessage(msg.Chat.Id, fmt.Sprintf("❌ 您的 username 或 bio 命中了黑名单词汇：<code>%s</code>，验证已拒绝。", escapeHTML(matched)), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return nil
+	}
+
+	if b.Captcha == nil {
+		bot.SendMessage(msg.Chat.Id, "❌ 验证服务未启用", nil)
+		return nil
+	}
+
+	verifyURL := b.Captcha.GenerateVerifyURL(chatID, userID, pending.Timestamp, pending.RandomToken)
+	_, err = bot.SendMessage(msg.Chat.Id,
+		"请点击下方按钮继续完成人机验证。",
+		&gotgbot.SendMessageOpts{
+			ReplyMarkup: gotgbot.InlineKeyboardMarkup{
+				InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
+					{Text: "🛡️ 打开验证页面", Url: verifyURL},
+				}},
+			},
+		},
+	)
+	if err != nil {
+		log.Printf("[bot] send private verification link error: %v", err)
+	}
 
 	return nil
 }

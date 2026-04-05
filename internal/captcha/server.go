@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -13,25 +14,30 @@ import (
 	"time"
 
 	"github.com/qwq233/fuckadbot/internal/config"
+	"github.com/qwq233/fuckadbot/internal/store"
 )
 
 //go:embed verify.html
 var verifyHTML embed.FS
 
 type Server struct {
-	cfg      *config.TurnstileConfig
-	botToken string
-	tmpl     *template.Template
-	onVerify func(chatID, userID int64) // callback when user passes verification
+	cfg          *config.TurnstileConfig
+	store        store.Store
+	verifyWindow time.Duration
+	botToken     string
+	tmpl         *template.Template
+	onVerify     func(chatID, userID int64) // callback when user passes verification
 }
 
-func NewServer(cfg *config.TurnstileConfig, botToken string, onVerify func(chatID, userID int64)) *Server {
+func NewServer(cfg *config.TurnstileConfig, st store.Store, verifyWindow time.Duration, botToken string, onVerify func(chatID, userID int64)) *Server {
 	tmpl := template.Must(template.ParseFS(verifyHTML, "verify.html"))
 	return &Server{
-		cfg:      cfg,
-		botToken: botToken,
-		tmpl:     tmpl,
-		onVerify: onVerify,
+		cfg:          cfg,
+		store:        st,
+		verifyWindow: verifyWindow,
+		botToken:     botToken,
+		tmpl:         tmpl,
+		onVerify:     onVerify,
 	}
 }
 
@@ -46,26 +52,92 @@ func (s *Server) Start() error {
 }
 
 // GenerateVerifyURL creates a signed verification URL.
-func (s *Server) GenerateVerifyURL(chatID, userID int64) string {
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
+func (s *Server) GenerateVerifyURL(chatID, userID int64, timestamp int64, randomToken string) string {
+	ts := strconv.FormatInt(timestamp, 10)
 	uid := strconv.FormatInt(userID, 10)
 	cid := strconv.FormatInt(chatID, 10)
-	sig := s.sign(uid, cid, ts)
+	sig := s.sign(uid, cid, ts, randomToken)
 
-	return fmt.Sprintf("%s?uid=%s&cid=%s&ts=%s&sig=%s",
+	return fmt.Sprintf("%s?uid=%s&cid=%s&timestamp=%s&rand=%s&sig=%s",
 		s.cfg.VerifyURL(),
-		uid, cid, ts, sig)
+		uid, cid, ts, randomToken, sig)
 }
 
-func (s *Server) sign(uid, cid, ts string) string {
+func (s *Server) sign(uid, cid, timestamp, randomToken string) string {
 	mac := hmac.New(sha256.New, []byte(s.botToken))
-	mac.Write([]byte(uid + ":" + cid + ":" + ts))
+	mac.Write([]byte(uid + ":" + cid + ":" + timestamp + ":" + randomToken))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Server) verifySignature(uid, cid, ts, sig string) bool {
-	expected := s.sign(uid, cid, ts)
+func (s *Server) verifySignature(uid, cid, timestamp, randomToken, sig string) bool {
+	expected := s.sign(uid, cid, timestamp, randomToken)
 	return hmac.Equal([]byte(expected), []byte(sig))
+}
+
+type verificationRequestError struct {
+	status  int
+	message string
+}
+
+func (e *verificationRequestError) Error() string {
+	return e.message
+}
+
+func (s *Server) validateVerificationRequest(uid, cid, timestamp, randomToken, sig string) (int64, int64, error) {
+	if uid == "" || cid == "" || timestamp == "" || randomToken == "" || sig == "" {
+		return 0, 0, &verificationRequestError{status: http.StatusBadRequest, message: "Missing parameters"}
+	}
+
+	if !s.verifySignature(uid, cid, timestamp, randomToken, sig) {
+		return 0, 0, &verificationRequestError{status: http.StatusForbidden, message: "Invalid signature"}
+	}
+
+	chatID, err := strconv.ParseInt(cid, 10, 64)
+	if err != nil {
+		return 0, 0, &verificationRequestError{status: http.StatusBadRequest, message: "Invalid chat id"}
+	}
+
+	userID, err := strconv.ParseInt(uid, 10, 64)
+	if err != nil {
+		return 0, 0, &verificationRequestError{status: http.StatusBadRequest, message: "Invalid user id"}
+	}
+
+	timestampValue, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return 0, 0, &verificationRequestError{status: http.StatusBadRequest, message: "Invalid timestamp"}
+	}
+
+	age := time.Since(time.Unix(timestampValue, 0))
+	if age < 0 || age > s.verifyWindow {
+		return 0, 0, &verificationRequestError{status: http.StatusGone, message: "链接已过期，请在群组中重新触发验证"}
+	}
+
+	pending, err := s.store.GetPending(chatID, userID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if pending == nil {
+		return 0, 0, &verificationRequestError{status: http.StatusGone, message: "链接已失效，请在群组中重新触发验证"}
+	}
+
+	if pending.Timestamp != timestampValue || pending.RandomToken != randomToken {
+		return 0, 0, &verificationRequestError{status: http.StatusForbidden, message: "链接已失效，请重新触发验证"}
+	}
+
+	if !pending.ExpireAt.After(time.Now().UTC()) {
+		return 0, 0, &verificationRequestError{status: http.StatusGone, message: "链接已过期，请在群组中重新触发验证"}
+	}
+
+	return chatID, userID, nil
+}
+
+func verificationErrorStatus(err error) int {
+	var validationErr *verificationRequestError
+	if errors.As(err, &validationErr) {
+		return validationErr.status
+	}
+
+	return http.StatusInternalServerError
 }
 
 func (s *Server) handleVerifyPage(w http.ResponseWriter, r *http.Request) {
@@ -76,23 +148,13 @@ func (s *Server) handleVerifyPage(w http.ResponseWriter, r *http.Request) {
 
 	uid := r.URL.Query().Get("uid")
 	cid := r.URL.Query().Get("cid")
-	ts := r.URL.Query().Get("ts")
+	timestamp := r.URL.Query().Get("timestamp")
+	randomToken := r.URL.Query().Get("rand")
 	sig := r.URL.Query().Get("sig")
 
-	if uid == "" || cid == "" || ts == "" || sig == "" {
-		http.Error(w, "Invalid parameters", http.StatusBadRequest)
-		return
-	}
-
-	if !s.verifySignature(uid, cid, ts, sig) {
-		http.Error(w, "Invalid signature", http.StatusForbidden)
-		return
-	}
-
-	// Check if link is expired
-	tsInt, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil || time.Since(time.Unix(tsInt, 0)) > s.cfg.GetVerifyTimeout() {
-		http.Error(w, "链接已过期，请在群组中重新触发验证", http.StatusGone)
+	_, _, err := s.validateVerificationRequest(uid, cid, timestamp, randomToken, sig)
+	if err != nil {
+		http.Error(w, err.Error(), verificationErrorStatus(err))
 		return
 	}
 
@@ -101,14 +163,16 @@ func (s *Server) handleVerifyPage(w http.ResponseWriter, r *http.Request) {
 		CallbackURL string
 		UID         string
 		CID         string
-		TS          string
+		Timestamp   string
+		Rand        string
 		Sig         string
 	}{
 		SiteKey:     s.cfg.SiteKey,
 		CallbackURL: s.cfg.CallbackURL(),
 		UID:         uid,
 		CID:         cid,
-		TS:          ts,
+		Timestamp:   timestamp,
+		Rand:        randomToken,
 		Sig:         sig,
 	}
 

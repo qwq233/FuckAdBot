@@ -7,9 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"time"
 )
 
 type turnstileResponse struct {
@@ -31,23 +29,19 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	uid := r.FormValue("uid")
 	cid := r.FormValue("cid")
-	ts := r.FormValue("ts")
+	timestamp := r.FormValue("timestamp")
+	randomToken := r.FormValue("rand")
 	sig := r.FormValue("sig")
 	cfToken := r.FormValue("cf-turnstile-response")
 
-	if uid == "" || cid == "" || ts == "" || sig == "" || cfToken == "" {
+	if cfToken == "" {
 		writeJSON(w, false, "Missing parameters")
 		return
 	}
 
-	if !s.verifySignature(uid, cid, ts, sig) {
-		writeJSON(w, false, "Invalid signature")
-		return
-	}
-
-	tsInt, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil || time.Since(time.Unix(tsInt, 0)) > s.cfg.GetVerifyTimeout() {
-		writeJSON(w, false, "链接已过期")
+	chatID, userID, err := s.validateVerificationRequest(uid, cid, timestamp, randomToken, sig)
+	if err != nil {
+		writeJSON(w, false, err.Error())
 		return
 	}
 
@@ -62,9 +56,6 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, false, "人机验证未通过，请重试")
 		return
 	}
-
-	chatID, _ := strconv.ParseInt(cid, 10, 64)
-	userID, _ := strconv.ParseInt(uid, 10, 64)
 
 	if s.onVerify != nil {
 		s.onVerify(chatID, userID)

@@ -3,9 +3,14 @@ package store
 import "time"
 
 type PendingVerification struct {
-	ChatID   int64
-	UserID   int64
-	ExpireAt time.Time
+	ChatID            int64
+	UserID            int64
+	Timestamp         int64
+	RandomToken       string
+	ExpireAt          time.Time
+	ReminderMessageID int64
+	MessageThreadID   int64
+	ReplyToMessageID  int64
 }
 
 type Store interface {
@@ -22,7 +27,8 @@ type Store interface {
 
 	// Pending verification window
 	HasActivePending(chatID, userID int64) (bool, error)
-	SetPending(chatID, userID int64, expireAt time.Time) error
+	GetPending(chatID, userID int64) (*PendingVerification, error)
+	SetPending(pending PendingVerification) error
 	ClearPending(chatID, userID int64) error
 
 	// Warning count
