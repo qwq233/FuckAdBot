@@ -51,6 +51,7 @@ func (s *SQLiteStore) migrate() error {
 			token_rand TEXT NOT NULL DEFAULT '',
 			expire_at DATETIME NOT NULL,
 			reminder_message_id INTEGER NOT NULL DEFAULT 0,
+			private_message_id INTEGER NOT NULL DEFAULT 0,
 			message_thread_id INTEGER NOT NULL DEFAULT 0,
 			reply_to_message_id INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (chat_id, user_id)
@@ -91,6 +92,7 @@ func (s *SQLiteStore) ensurePendingVerificationColumns() error {
 		"token_timestamp":     "INTEGER NOT NULL DEFAULT 0",
 		"token_rand":          "TEXT NOT NULL DEFAULT ''",
 		"reminder_message_id": "INTEGER NOT NULL DEFAULT 0",
+		"private_message_id":  "INTEGER NOT NULL DEFAULT 0",
 		"message_thread_id":   "INTEGER NOT NULL DEFAULT 0",
 		"reply_to_message_id": "INTEGER NOT NULL DEFAULT 0",
 	}
@@ -209,7 +211,7 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 	var pending PendingVerification
 	var expireAt string
 	err := s.db.QueryRow(
-		`SELECT chat_id, user_id, token_timestamp, token_rand, expire_at, reminder_message_id, message_thread_id, reply_to_message_id
+		`SELECT chat_id, user_id, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, message_thread_id, reply_to_message_id
 		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID,
 	).Scan(
@@ -219,6 +221,7 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 		&pending.RandomToken,
 		&expireAt,
 		&pending.ReminderMessageID,
+		&pending.PrivateMessageID,
 		&pending.MessageThreadID,
 		&pending.ReplyToMessageID,
 	)
@@ -246,14 +249,16 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 			token_rand,
 			expire_at,
 			reminder_message_id,
+			private_message_id,
 			message_thread_id,
 			reply_to_message_id
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(chat_id, user_id) DO UPDATE SET
 		 	token_timestamp = excluded.token_timestamp,
 		 	token_rand = excluded.token_rand,
 		 	expire_at = excluded.expire_at,
 		 	reminder_message_id = excluded.reminder_message_id,
+		 	private_message_id = excluded.private_message_id,
 		 	message_thread_id = excluded.message_thread_id,
 		 	reply_to_message_id = excluded.reply_to_message_id`,
 		pending.ChatID,
@@ -262,6 +267,7 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 		pending.RandomToken,
 		pending.ExpireAt.UTC().Format(time.DateTime),
 		pending.ReminderMessageID,
+		pending.PrivateMessageID,
 		pending.MessageThreadID,
 		pending.ReplyToMessageID,
 	)

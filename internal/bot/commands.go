@@ -471,7 +471,13 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 	}
 
 	verifyURL := b.Captcha.GenerateVerifyURL(chatID, userID, pending.Timestamp, pending.RandomToken)
-	_, err = bot.SendMessage(msg.Chat.Id,
+	if pending.PrivateMessageID != 0 {
+		if _, err := bot.DeleteMessage(msg.Chat.Id, pending.PrivateMessageID, nil); err != nil {
+			log.Printf("[bot] delete previous private verification message error: %v", err)
+		}
+	}
+
+	privateVerificationMsg, err := bot.SendMessage(msg.Chat.Id,
 		"请点击下方按钮继续完成人机验证。",
 		&gotgbot.SendMessageOpts{
 			ReplyMarkup: gotgbot.InlineKeyboardMarkup{
@@ -483,6 +489,12 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 	)
 	if err != nil {
 		log.Printf("[bot] send private verification link error: %v", err)
+		return nil
+	}
+
+	pending.PrivateMessageID = privateVerificationMsg.MessageId
+	if err := b.Store.SetPending(*pending); err != nil {
+		log.Printf("[bot] store.SetPending error after private verification message: %v", err)
 	}
 
 	return nil

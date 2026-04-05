@@ -3,6 +3,8 @@ package bot
 import (
 	"fmt"
 	"log"
+	"strings"
+	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 )
@@ -27,8 +29,22 @@ func (b *Bot) HandleVerificationSuccess(chatID, userID int64) {
 			log.Printf("[bot] delete reminder message after verification error: %v", err)
 		}
 	}
+	if pending.PrivateMessageID != 0 {
+		if _, err := b.Bot.DeleteMessage(userID, pending.PrivateMessageID, nil); err != nil {
+			log.Printf("[bot] delete private verification message after verification error: %v", err)
+		}
+	}
 
-	// Send success notification to user via private chat.
 	text := fmt.Sprintf("✅ 您已完成群组 <code>%d</code> 的人机验证，现在可以正常发言了。", chatID)
-	b.Bot.SendMessage(userID, text, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	successMsg, err := b.Bot.SendMessage(userID, text, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	if err != nil {
+		log.Printf("[bot] send verification success private message error: %v", err)
+		return
+	}
+
+	time.AfterFunc(15*time.Second, func() {
+		if _, err := b.Bot.DeleteMessage(userID, successMsg.MessageId, nil); err != nil && !strings.Contains(strings.ToLower(err.Error()), "message to delete not found") {
+			log.Printf("[bot] delete verification success private message error: %v", err)
+		}
+	})
 }

@@ -9,6 +9,7 @@ type PendingVerification struct {
 	RandomToken       string
 	ExpireAt          time.Time
 	ReminderMessageID int64
+	PrivateMessageID  int64
 	MessageThreadID   int64
 	ReplyToMessageID  int64
 }

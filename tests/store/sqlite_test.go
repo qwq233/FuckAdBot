@@ -91,6 +91,7 @@ func TestSQLiteStorePendingVerificationRoundTrip(t *testing.T) {
 		RandomToken:       "abc123x",
 		ExpireAt:          expireAt,
 		ReminderMessageID: 7001,
+		PrivateMessageID:  8001,
 		MessageThreadID:   9001,
 		ReplyToMessageID:  5001,
 	}
@@ -107,7 +108,7 @@ func TestSQLiteStorePendingVerificationRoundTrip(t *testing.T) {
 		t.Fatal("GetPending() = nil, want value")
 	}
 
-	if got.ChatID != want.ChatID || got.UserID != want.UserID || got.Timestamp != want.Timestamp || got.RandomToken != want.RandomToken || got.ReminderMessageID != want.ReminderMessageID || got.MessageThreadID != want.MessageThreadID || got.ReplyToMessageID != want.ReplyToMessageID {
+	if got.ChatID != want.ChatID || got.UserID != want.UserID || got.Timestamp != want.Timestamp || got.RandomToken != want.RandomToken || got.ReminderMessageID != want.ReminderMessageID || got.PrivateMessageID != want.PrivateMessageID || got.MessageThreadID != want.MessageThreadID || got.ReplyToMessageID != want.ReplyToMessageID {
 		t.Fatalf("GetPending() = %+v, want %+v", *got, want)
 	}
 
