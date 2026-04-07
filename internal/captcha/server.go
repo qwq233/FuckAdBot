@@ -1,6 +1,7 @@
 package captcha
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"embed"
@@ -27,6 +28,7 @@ type Server struct {
 	botToken     string
 	tmpl         *template.Template
 	onVerify     func(chatID, userID int64) // callback when user passes verification
+	httpServer   *http.Server
 }
 
 func NewServer(cfg *config.TurnstileConfig, st store.Store, verifyWindow time.Duration, botToken string, onVerify func(chatID, userID int64)) *Server {
@@ -47,8 +49,20 @@ func (s *Server) Start() error {
 	mux.HandleFunc(config.CallbackPath, s.handleCallback)
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.ListenAddr, s.cfg.ListenPort)
+	s.httpServer = &http.Server{Addr: addr, Handler: mux}
 	log.Printf("[captcha] HTTP server listening on %s", addr)
-	return http.ListenAndServe(addr, mux)
+	if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// Shutdown gracefully stops the captcha HTTP server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.httpServer == nil {
+		return nil
+	}
+	return s.httpServer.Shutdown(ctx)
 }
 
 // GenerateVerifyURL creates a signed verification URL.

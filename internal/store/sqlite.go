@@ -463,16 +463,15 @@ func (s *SQLiteStore) GetWarningCount(chatID, userID int64) (int, error) {
 }
 
 func (s *SQLiteStore) IncrWarningCount(chatID, userID int64) (int, error) {
-	_, err := s.db.Exec(
+	var count int
+	err := s.db.QueryRow(
 		`INSERT INTO warnings (chat_id, user_id, count, updated_at)
 		 VALUES (?, ?, 1, datetime('now'))
-		 ON CONFLICT(chat_id, user_id) DO UPDATE SET count = count + 1, updated_at = datetime('now')`,
+		 ON CONFLICT(chat_id, user_id) DO UPDATE SET count = count + 1, updated_at = datetime('now')
+		 RETURNING count`,
 		chatID, userID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return s.GetWarningCount(chatID, userID)
+	).Scan(&count)
+	return count, err
 }
 
 func (s *SQLiteStore) ResetWarningCount(chatID, userID int64) error {

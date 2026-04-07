@@ -184,9 +184,10 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	// Schedule verification window expiry check
 	capturedUserID := user.Id
 	capturedChatID := chatID
-	time.AfterFunc(verifyWindow, func() {
+	t := time.AfterFunc(verifyWindow, func() {
 		b.onVerifyWindowExpired(bot, capturedChatID, capturedUserID)
 	})
+	b.trackUserTimer(capturedChatID, capturedUserID, t)
 
 	return nil
 }
@@ -234,11 +235,12 @@ func (b *Bot) scheduleOriginalMessageDeletion(bot *gotgbot.Bot, chatID, userID i
 		return
 	}
 
-	time.AfterFunc(originalMessageTTL, func() {
+	t := time.AfterFunc(originalMessageTTL, func() {
 		if err := b.deletePendingOriginalMessage(bot, chatID, userID, false); err != nil {
 			log.Printf("[bot] delete pending original message after ttl error: %v", err)
 		}
 	})
+	b.trackUserTimer(chatID, userID, t)
 }
 
 func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, chatID, userID int64, force bool) error {

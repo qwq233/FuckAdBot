@@ -1,7 +1,10 @@
 package bot
 
 import (
+	"context"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
@@ -15,6 +18,8 @@ import (
 	"github.com/qwq233/fuckadbot/internal/store"
 )
 
+type timerKey struct{ chatID, userID int64 }
+
 type Bot struct {
 	Bot       *gotgbot.Bot
 	Config    *config.Config
@@ -22,7 +27,9 @@ type Bot struct {
 	Blacklist *blacklist.Blacklist
 	Captcha   *captcha.Server
 
-	cache botCache
+	cache    botCache
+	timersMu sync.Mutex
+	timers   map[timerKey][]*time.Timer
 }
 
 func New(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs *captcha.Server) (*Bot, error) {
@@ -39,10 +46,30 @@ func New(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs *captch
 		Store:     st,
 		Blacklist: bl,
 		Captcha:   cs,
+		timers:    make(map[timerKey][]*time.Timer),
 	}, nil
 }
 
-func (b *Bot) Start() error {
+// trackUserTimer registers a timer so it can be cancelled via cancelUserTimers.
+func (b *Bot) trackUserTimer(chatID, userID int64, t *time.Timer) {
+	b.timersMu.Lock()
+	defer b.timersMu.Unlock()
+	key := timerKey{chatID, userID}
+	b.timers[key] = append(b.timers[key], t)
+}
+
+// cancelUserTimers stops all pending timers for a (chatID, userID) pair.
+func (b *Bot) cancelUserTimers(chatID, userID int64) {
+	b.timersMu.Lock()
+	defer b.timersMu.Unlock()
+	key := timerKey{chatID, userID}
+	for _, t := range b.timers[key] {
+		t.Stop()
+	}
+	delete(b.timers, key)
+}
+
+func (b *Bot) Start(ctx context.Context) error {
 	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
 		Error: func(_ *gotgbot.Bot, _ *ext.Context, err error) ext.DispatcherAction {
 			log.Printf("[bot] handler error: %v", err)
@@ -86,7 +113,16 @@ func (b *Bot) Start() error {
 		return err
 	}
 
+	b.cache.startCleanup(ctx)
+
 	log.Printf("[bot] Bot is running. Press Ctrl+C to stop.")
+	go func() {
+		<-ctx.Done()
+		log.Printf("[bot] Shutting down...")
+		if err := updater.Stop(); err != nil {
+			log.Printf("[bot] updater.Stop error: %v", err)
+		}
+	}()
 	updater.Idle()
 	return nil
 }

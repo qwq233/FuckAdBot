@@ -3,6 +3,7 @@ package store_test
 import (
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -650,5 +651,63 @@ func TestSQLiteStoreClearUserVerificationStateEverywhere(t *testing.T) {
 	}
 	if warningsB != 0 {
 		t.Fatalf("GetWarningCount(chatB) = %d, want 0 after reset", warningsB)
+	}
+}
+
+// TestIncrWarningCountReturnsNewCount verifies IncrWarningCount returns the
+// post-increment count in a single atomic operation.
+func TestIncrWarningCountReturnsNewCount(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	for want := 1; want <= 5; want++ {
+		count, err := store.IncrWarningCount(-100123, 42)
+		if err != nil {
+			t.Fatalf("IncrWarningCount() iteration %d error = %v", want, err)
+		}
+		if count != want {
+			t.Fatalf("IncrWarningCount() = %d, want %d", count, want)
+		}
+	}
+}
+
+// TestIncrWarningCountConcurrent fires many goroutines that each increment the
+// same counter. Run with -race to validate there are no data races, and verify
+// the final count equals the number of increments performed.
+func TestIncrWarningCountConcurrent(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	const goroutines = 20
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			if _, err := store.IncrWarningCount(-100123, 42); err != nil {
+				// t.Errorf is goroutine-safe.
+				t.Errorf("IncrWarningCount() error = %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	count, err := store.GetWarningCount(-100123, 42)
+	if err != nil {
+		t.Fatalf("GetWarningCount() error = %v", err)
+	}
+	if count != goroutines {
+		t.Fatalf("GetWarningCount() = %d, want %d (concurrent increment mismatch)", count, goroutines)
 	}
 }

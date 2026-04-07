@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"log"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/qwq233/fuckadbot/internal/blacklist"
 	"github.com/qwq233/fuckadbot/internal/bot"
@@ -11,14 +16,18 @@ import (
 )
 
 func main() {
-	const configPath = "config.toml"
+	configPath := flag.String("config", "config.toml", "path to config file")
+	flag.Parse()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Load config
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
-	log.Printf("[main] Config loaded from %s", configPath)
+	log.Printf("[main] Config loaded from %s", *configPath)
 
 	// Initialize store
 	var st store.Store
@@ -72,13 +81,24 @@ func main() {
 
 		go func() {
 			if err := cs.Start(); err != nil {
-				log.Fatalf("Captcha server error: %v", err)
+				log.Printf("[captcha] Server stopped: %v", err)
+			}
+		}()
+
+		// Stop captcha server on shutdown
+		go func() {
+			<-ctx.Done()
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := cs.Shutdown(shutCtx); err != nil {
+				log.Printf("[captcha] Shutdown error: %v", err)
 			}
 		}()
 	}
 
-	// Start bot (blocking)
-	if err := b.Start(); err != nil {
+	// Start bot (blocking until ctx is cancelled)
+	if err := b.Start(ctx); err != nil {
 		log.Fatalf("Bot error: %v", err)
 	}
+	log.Printf("[main] Shutdown complete.")
 }

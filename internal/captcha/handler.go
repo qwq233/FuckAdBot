@@ -83,7 +83,9 @@ func extractClientIP(r *http.Request) string {
 
 		if header == "X-Forwarded-For" {
 			parts := strings.Split(value, ",")
-			value = strings.TrimSpace(parts[0])
+			// Take the rightmost entry: it's appended by the nearest trusted proxy
+			// and cannot be injected by the client (unlike the leftmost entry).
+			value = strings.TrimSpace(parts[len(parts)-1])
 		}
 
 		if host, _, err := net.SplitHostPort(value); err == nil {

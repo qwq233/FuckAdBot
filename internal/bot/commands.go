@@ -37,6 +37,15 @@ func (b *Bot) isAdmin(bot *gotgbot.Bot, chatID, userID int64) bool {
 	return b.isBotAdmin(userID) || b.isGroupAdmin(bot, chatID, userID)
 }
 
+// isBlocklistAdmin reports whether the message sender may manage the
+// blacklist: bot-level admins in private chats, group admins in groups.
+func (b *Bot) isBlocklistAdmin(bot *gotgbot.Bot, msg *gotgbot.Message) bool {
+	if msg.Chat.Type == "private" {
+		return b.isBotAdmin(msg.From.Id)
+	}
+	return b.isAdmin(bot, msg.Chat.Id, msg.From.Id)
+}
+
 func isAnonymousGroupAdminMessage(msg *gotgbot.Message) bool {
 	if msg == nil || msg.SenderChat == nil {
 		return false
@@ -102,14 +111,8 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
-	if isPrivate {
-		if !b.isBotAdmin(msg.From.Id) {
-			return nil
-		}
-	} else {
-		if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
-			return nil
-		}
+	if !b.isBlocklistAdmin(bot, msg) {
+		return nil
 	}
 
 	args := strings.Fields(msg.Text)
@@ -170,14 +173,8 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
-	if isPrivate {
-		if !b.isBotAdmin(msg.From.Id) {
-			return nil
-		}
-	} else {
-		if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
-			return nil
-		}
+	if !b.isBlocklistAdmin(bot, msg) {
+		return nil
 	}
 
 	args := strings.Fields(msg.Text)
@@ -248,14 +245,8 @@ func (b *Bot) cmdListBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
-	if isPrivate {
-		if !b.isBotAdmin(msg.From.Id) {
-			return nil
-		}
-	} else {
-		if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
-			return nil
-		}
+	if !b.isBlocklistAdmin(bot, msg) {
+		return nil
 	}
 
 	var words []string
@@ -643,6 +634,7 @@ func escapeHTML(s string) string {
 }
 
 func (b *Bot) approveUser(chatID, userID int64) error {
+	b.cancelUserTimers(chatID, userID)
 	return errors.Join(
 		b.Store.SetVerified(chatID, userID),
 		b.Store.ClearPending(chatID, userID),
@@ -652,6 +644,7 @@ func (b *Bot) approveUser(chatID, userID int64) error {
 }
 
 func (b *Bot) rejectUser(chatID, userID int64) error {
+	b.cancelUserTimers(chatID, userID)
 	pending, err := b.Store.GetPending(chatID, userID)
 	if err != nil {
 		return err
