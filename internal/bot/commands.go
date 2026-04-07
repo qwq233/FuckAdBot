@@ -37,6 +37,46 @@ func (b *Bot) isAdmin(bot *gotgbot.Bot, chatID, userID int64) bool {
 	return b.isBotAdmin(userID) || b.isGroupAdmin(bot, chatID, userID)
 }
 
+func isAnonymousGroupAdminMessage(msg *gotgbot.Message) bool {
+	if msg == nil || msg.SenderChat == nil {
+		return false
+	}
+
+	if msg.Chat.Type != "group" && msg.Chat.Type != "supergroup" {
+		return false
+	}
+
+	return msg.SenderChat.Id == msg.Chat.Id
+}
+
+func (b *Bot) canApproveFromMessage(bot *gotgbot.Bot, msg *gotgbot.Message) bool {
+	if msg == nil {
+		return false
+	}
+
+	if msg.From != nil && b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
+		return true
+	}
+
+	return isAnonymousGroupAdminMessage(msg)
+}
+
+func commandActorLabel(msg *gotgbot.Message) string {
+	if msg == nil {
+		return "unknown"
+	}
+
+	if msg.From != nil {
+		return strconv.FormatInt(msg.From.Id, 10)
+	}
+
+	if isAnonymousGroupAdminMessage(msg) {
+		return "anonymous-admin"
+	}
+
+	return "unknown"
+}
+
 // extractTargetUserID gets a user ID from command args or reply_to_message.
 func extractTargetUserID(msg *gotgbot.Message, args []string) (int64, error) {
 	if len(args) > 0 {
@@ -254,11 +294,11 @@ func (b *Bot) cmdListBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
-	if msg.From == nil {
+	if msg == nil {
 		return nil
 	}
 
-	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
+	if !b.canApproveFromMessage(bot, msg) {
 		return nil
 	}
 
@@ -280,7 +320,7 @@ func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 		})
 		return nil
 	}
-	log.Printf("[bot] manual approve via command: admin=%d target=%d chat=%d", msg.From.Id, userID, chatID)
+	log.Printf("[bot] manual approve via command: admin=%s target=%d chat=%d", commandActorLabel(msg), userID, chatID)
 
 	reply := fmt.Sprintf("✅ 已批准用户 <code>%d</code> 的验证", userID)
 	resp, err := bot.SendMessage(chatID, reply, &gotgbot.SendMessageOpts{
@@ -292,6 +332,38 @@ func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 	scheduleMessageDeletion(bot, chatID, resp.MessageId, manualModerationResultTTL, "approve confirmation")
+
+	return nil
+}
+
+func (b *Bot) cmdResetAllVerify(bot *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+	if msg == nil || msg.From == nil || !b.isBotAdmin(msg.From.Id) {
+		return nil
+	}
+
+	args := strings.Fields(msg.Text)
+	userID, err := extractTargetUserID(msg, args[1:])
+	if err != nil {
+		bot.SendMessage(msg.Chat.Id, "用法: /resetallverify <uid>，或回复目标用户消息后执行 /resetallverify", &gotgbot.SendMessageOpts{
+			MessageThreadId: msg.MessageThreadId,
+		})
+		return nil
+	}
+
+	if err := b.Store.ClearUserVerificationStateEverywhere(userID); err != nil {
+		log.Printf("[bot] ClearUserVerificationStateEverywhere error: %v", err)
+		bot.SendMessage(msg.Chat.Id, "❌ 清空用户全部聊天室验证状态失败", &gotgbot.SendMessageOpts{
+			MessageThreadId: msg.MessageThreadId,
+		})
+		return nil
+	}
+
+	log.Printf("[bot] reset all verification state via command: admin=%d target=%d", msg.From.Id, userID)
+	bot.SendMessage(msg.Chat.Id, fmt.Sprintf("✅ 已清空用户 <code>%d</code> 在所有聊天室中的验证状态、待验证记录和警告计数", userID), &gotgbot.SendMessageOpts{
+		ParseMode:       "HTML",
+		MessageThreadId: msg.MessageThreadId,
+	})
 
 	return nil
 }
@@ -416,7 +488,7 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	bot.SendMessage(msg.Chat.Id,
-			"如果您需要完成人机验证，请点击群组中发送给您的验证链接。\n\n"+
+		"如果您需要完成人机验证，请点击群组中发送给您的验证链接。\n\n"+
 			"<b>管理员命令:</b>\n"+
 			"/addblocklist &lt;词汇&gt; - 添加黑名单\n"+
 			"/delblocklist &lt;词汇&gt; - 移除黑名单\n"+
@@ -424,6 +496,7 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 			"/approve &lt;uid&gt; - 批准验证\n"+
 			"/reject &lt;uid&gt; - 拒绝验证\n"+
 			"/unreject &lt;uid&gt; - 撤销拒绝\n"+
+			"/resetallverify &lt;uid&gt; - 清空用户所有聊天室验证状态(仅超级管理员)\n"+
 			"/stats - 查看统计",
 		&gotgbot.SendMessageOpts{ParseMode: "HTML"},
 	)
@@ -464,10 +537,11 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 		if err := b.Store.ClearPending(chatID, userID); err != nil {
 			log.Printf("[bot] store.ClearPending error after blacklist hit in /start: %v", err)
 		}
+		if pending.OriginalMessageID != 0 {
+			deleteMessageIfExists(bot, chatID, pending.OriginalMessageID, "pending original after /start blacklist hit")
+		}
 		if pending.ReminderMessageID != 0 {
-			if _, err := bot.DeleteMessage(chatID, pending.ReminderMessageID, nil); err != nil {
-				log.Printf("[bot] delete reminder message after /start blacklist hit error: %v", err)
-			}
+			deleteMessageIfExists(bot, chatID, pending.ReminderMessageID, "verification reminder after /start blacklist hit")
 		}
 		if _, err := bot.BanChatMember(chatID, userID, &gotgbot.BanChatMemberOpts{}); err != nil {
 			log.Printf("[bot] ban user after /start blacklist hit error: %v", err)
@@ -527,6 +601,20 @@ func (b *Bot) approveUser(chatID, userID int64) error {
 }
 
 func (b *Bot) rejectUser(chatID, userID int64) error {
+	pending, err := b.Store.GetPending(chatID, userID)
+	if err != nil {
+		return err
+	}
+
+	if pending != nil {
+		if pending.OriginalMessageID != 0 {
+			deleteMessageIfExists(b.Bot, chatID, pending.OriginalMessageID, "pending original after reject")
+		}
+		if pending.PrivateMessageID != 0 {
+			deleteMessageIfExists(b.Bot, userID, pending.PrivateMessageID, "private verification message after reject")
+		}
+	}
+
 	return errors.Join(
 		b.Store.SetRejected(chatID, userID),
 		b.Store.ClearPending(chatID, userID),

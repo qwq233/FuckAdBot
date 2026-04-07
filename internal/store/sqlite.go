@@ -52,6 +52,7 @@ func (s *SQLiteStore) migrate() error {
 			expire_at DATETIME NOT NULL,
 			reminder_message_id INTEGER NOT NULL DEFAULT 0,
 			private_message_id INTEGER NOT NULL DEFAULT 0,
+			original_message_id INTEGER NOT NULL DEFAULT 0,
 			message_thread_id INTEGER NOT NULL DEFAULT 0,
 			reply_to_message_id INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (chat_id, user_id)
@@ -78,6 +79,9 @@ func (s *SQLiteStore) migrate() error {
 		}
 	}
 
+	if err := s.migrateSchemaVersion(); err != nil {
+		return err
+	}
 	if err := s.ensurePendingVerificationColumns(); err != nil {
 		return err
 	}
@@ -87,16 +91,55 @@ func (s *SQLiteStore) migrate() error {
 	return nil
 }
 
+func (s *SQLiteStore) migrateSchemaVersion() error {
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+
+	switch version {
+	case 0:
+		if err := s.migrateToVersion1(); err != nil {
+			return err
+		}
+	case 1:
+		return nil
+	default:
+		return fmt.Errorf("unsupported database schema version: %d", version)
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) migrateToVersion1() error {
+	if err := s.addPendingVerificationColumns(map[string]string{
+		"original_message_id": "INTEGER NOT NULL DEFAULT 0",
+	}); err != nil {
+		return fmt.Errorf("migrate database schema from version 0 to 1: %w", err)
+	}
+
+	if _, err := s.db.Exec(`PRAGMA user_version = 1`); err != nil {
+		return fmt.Errorf("set user_version to 1: %w", err)
+	}
+
+	return nil
+}
+
 func (s *SQLiteStore) ensurePendingVerificationColumns() error {
 	requiredColumns := map[string]string{
 		"token_timestamp":     "INTEGER NOT NULL DEFAULT 0",
 		"token_rand":          "TEXT NOT NULL DEFAULT ''",
 		"reminder_message_id": "INTEGER NOT NULL DEFAULT 0",
 		"private_message_id":  "INTEGER NOT NULL DEFAULT 0",
+		"original_message_id": "INTEGER NOT NULL DEFAULT 0",
 		"message_thread_id":   "INTEGER NOT NULL DEFAULT 0",
 		"reply_to_message_id": "INTEGER NOT NULL DEFAULT 0",
 	}
 
+	return s.addPendingVerificationColumns(requiredColumns)
+}
+
+func (s *SQLiteStore) addPendingVerificationColumns(requiredColumns map[string]string) error {
 	rows, err := s.db.Query(`PRAGMA table_info(pending_verifications)`)
 	if err != nil {
 		return fmt.Errorf("pragma pending_verifications: %w", err)
@@ -211,7 +254,7 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 	var pending PendingVerification
 	var expireAt string
 	err := s.db.QueryRow(
-		`SELECT chat_id, user_id, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, message_thread_id, reply_to_message_id
+		`SELECT chat_id, user_id, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
 		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID,
 	).Scan(
@@ -222,6 +265,7 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 		&expireAt,
 		&pending.ReminderMessageID,
 		&pending.PrivateMessageID,
+		&pending.OriginalMessageID,
 		&pending.MessageThreadID,
 		&pending.ReplyToMessageID,
 	)
@@ -250,15 +294,17 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 			expire_at,
 			reminder_message_id,
 			private_message_id,
+			original_message_id,
 			message_thread_id,
 			reply_to_message_id
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(chat_id, user_id) DO UPDATE SET
 		 	token_timestamp = excluded.token_timestamp,
 		 	token_rand = excluded.token_rand,
 		 	expire_at = excluded.expire_at,
 		 	reminder_message_id = excluded.reminder_message_id,
 		 	private_message_id = excluded.private_message_id,
+		 	original_message_id = excluded.original_message_id,
 		 	message_thread_id = excluded.message_thread_id,
 		 	reply_to_message_id = excluded.reply_to_message_id`,
 		pending.ChatID,
@@ -268,6 +314,7 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 		pending.ExpireAt.UTC().Format(time.DateTime),
 		pending.ReminderMessageID,
 		pending.PrivateMessageID,
+		pending.OriginalMessageID,
 		pending.MessageThreadID,
 		pending.ReplyToMessageID,
 	)
@@ -280,6 +327,28 @@ func (s *SQLiteStore) ClearPending(chatID, userID int64) error {
 		chatID, userID,
 	)
 	return err
+}
+
+func (s *SQLiteStore) ClearUserVerificationStateEverywhere(userID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	queries := []string{
+		`DELETE FROM pending_verifications WHERE user_id = ?`,
+		`DELETE FROM warnings WHERE user_id = ?`,
+		`DELETE FROM user_status WHERE user_id = ?`,
+	}
+
+	for _, query := range queries {
+		if _, err := tx.Exec(query, userID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 // --- Warnings ---

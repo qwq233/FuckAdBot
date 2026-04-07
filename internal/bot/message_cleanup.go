@@ -16,8 +16,16 @@ func scheduleMessageDeletion(bot *gotgbot.Bot, chatID, messageID int64, delay ti
 	}
 
 	time.AfterFunc(delay, func() {
-		if _, err := bot.DeleteMessage(chatID, messageID, nil); err != nil && !strings.Contains(strings.ToLower(err.Error()), "message to delete not found") {
-			log.Printf("[bot] delete %s message error: chat=%d message=%d err=%v", label, chatID, messageID, err)
-		}
+		deleteMessageIfExists(bot, chatID, messageID, label)
 	})
+}
+
+func deleteMessageIfExists(bot *gotgbot.Bot, chatID, messageID int64, label string) {
+	if bot == nil || chatID == 0 || messageID == 0 {
+		return
+	}
+
+	if _, err := bot.DeleteMessage(chatID, messageID, nil); err != nil && !strings.Contains(strings.ToLower(err.Error()), "message to delete not found") {
+		log.Printf("[bot] delete %s message error: chat=%d message=%d err=%v", label, chatID, messageID, err)
+	}
 }

@@ -78,12 +78,9 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 	if rejected {
 		// Silently delete, no reminder, no warning increment
-		bot.DeleteMessage(chatID, msg.MessageId, nil)
+		deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message")
 		return nil
 	}
-
-	// --- Unverified user: delete message ---
-	bot.DeleteMessage(chatID, msg.MessageId, nil)
 
 	// Check if there's an active pending verification window
 	hasPending, err := b.Store.HasActivePending(chatID, user.Id)
@@ -93,6 +90,10 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 	if hasPending {
 		// Active window exists, silently delete without new reminder
+		deleteMessageIfExists(bot, chatID, msg.MessageId, "extra pending user message")
+		if err := b.deletePendingOriginalMessage(bot, chatID, user.Id, false); err != nil {
+			log.Printf("[bot] delete pending original message during active window error: %v", err)
+		}
 		return nil
 	}
 
@@ -107,6 +108,7 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if warnCount >= maxWarnings {
 		// Already exceeded max warnings, ban
 		log.Printf("[bot] banning user=%d in chat=%d: exceeded max warnings (%d)", user.Id, chatID, maxWarnings)
+		deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message before ban")
 		bot.BanChatMember(chatID, user.Id, &gotgbot.BanChatMemberOpts{})
 		return nil
 	}
@@ -128,20 +130,19 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	// Send reminder in the same comment thread
 	sendOpts := &gotgbot.SendMessageOpts{
 		ParseMode: "HTML",
+		ReplyParameters: &gotgbot.ReplyParameters{
+			MessageId:                msg.MessageId,
+			AllowSendingWithoutReply: true,
+		},
 	}
 	if msg.MessageThreadId != 0 {
 		sendOpts.MessageThreadId = msg.MessageThreadId
-	}
-	if replyTargetMessageID := reminderReplyTargetMessageID(msg); replyTargetMessageID != 0 {
-		sendOpts.ReplyParameters = &gotgbot.ReplyParameters{
-			MessageId:                replyTargetMessageID,
-			AllowSendingWithoutReply: true,
-		}
 	}
 
 	reminderMsg, err := bot.SendMessage(chatID, reminderText, sendOpts)
 	if err != nil {
 		log.Printf("[bot] send reminder error: %v", err)
+		deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after reminder failure")
 		return nil
 	}
 
@@ -155,13 +156,13 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		RandomToken:       randomToken,
 		ExpireAt:          expireAt,
 		ReminderMessageID: reminderMsg.MessageId,
+		OriginalMessageID: msg.MessageId,
 		MessageThreadID:   msg.MessageThreadId,
-		ReplyToMessageID:  reminderReplyTargetMessageID(msg),
+		ReplyToMessageID:  msg.MessageId,
 	}); err != nil {
 		log.Printf("[bot] store.SetPending error: %v", err)
-		if _, err := bot.DeleteMessage(chatID, reminderMsg.MessageId, nil); err != nil {
-			log.Printf("[bot] delete reminder message after pending persist failure: %v", err)
-		}
+		deleteMessageIfExists(bot, chatID, reminderMsg.MessageId, "verification reminder after pending persist failure")
+		deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after pending persist failure")
 		return nil
 	}
 
@@ -175,6 +176,7 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	// Keep the reminder visible for the full verification window unless configured longer.
 	reminderTTL := b.Config.Moderation.GetReminderTTL()
 	scheduleMessageDeletion(bot, chatID, reminderMsg.MessageId, reminderTTL, "verification reminder")
+	b.scheduleOriginalMessageDeletion(bot, chatID, user.Id)
 
 	// Schedule verification window expiry check
 	capturedUserID := user.Id
@@ -186,10 +188,16 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	return nil
 }
 
-// onVerifyWindowExpired is called when the 5-minute verification window expires.
+// onVerifyWindowExpired is called when the verification window expires.
 func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, chatID, userID int64) {
+	if err := b.deletePendingOriginalMessage(bot, chatID, userID, true); err != nil {
+		log.Printf("[bot] delete pending original message on expiry error: %v", err)
+	}
+
 	// Clear the pending record
-	b.Store.ClearPending(chatID, userID)
+	if err := b.Store.ClearPending(chatID, userID); err != nil {
+		log.Printf("[bot] store.ClearPending error in expiry: %v", err)
+	}
 
 	// Check if user verified during the window
 	verified, err := b.Store.IsVerified(chatID, userID)
@@ -217,6 +225,52 @@ func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, chatID, userID int64) {
 	}
 }
 
+func (b *Bot) scheduleOriginalMessageDeletion(bot *gotgbot.Bot, chatID, userID int64) {
+	originalMessageTTL := b.Config.Moderation.GetOriginalMessageTTL()
+	if originalMessageTTL <= 0 {
+		return
+	}
+
+	time.AfterFunc(originalMessageTTL, func() {
+		if err := b.deletePendingOriginalMessage(bot, chatID, userID, false); err != nil {
+			log.Printf("[bot] delete pending original message after ttl error: %v", err)
+		}
+	})
+}
+
+func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, chatID, userID int64, force bool) error {
+	verified, err := b.Store.IsVerified(chatID, userID)
+	if err != nil {
+		return fmt.Errorf("check verified status before deleting original message: %w", err)
+	}
+	if verified {
+		return nil
+	}
+
+	pending, err := b.Store.GetPending(chatID, userID)
+	if err != nil {
+		return fmt.Errorf("load pending verification before deleting original message: %w", err)
+	}
+	if pending == nil || pending.OriginalMessageID == 0 {
+		return nil
+	}
+
+	if !force {
+		deleteAt := time.Unix(pending.Timestamp, 0).UTC().Add(b.Config.Moderation.GetOriginalMessageTTL())
+		if time.Now().UTC().Before(deleteAt) {
+			return nil
+		}
+	}
+
+	deleteMessageIfExists(bot, chatID, pending.OriginalMessageID, "pending original")
+	pending.OriginalMessageID = 0
+	if err := b.Store.SetPending(*pending); err != nil {
+		return fmt.Errorf("persist original message deletion state: %w", err)
+	}
+
+	return nil
+}
+
 // buildCheckText assembles text from user fields for blacklist matching.
 func buildCheckText(user *gotgbot.User) string {
 	text := user.FirstName
@@ -227,22 +281,6 @@ func buildCheckText(user *gotgbot.User) string {
 		text += " " + user.Username
 	}
 	return text
-}
-
-func reminderReplyTargetMessageID(msg *gotgbot.Message) int64 {
-	if msg == nil {
-		return 0
-	}
-
-	if msg.MessageThreadId != 0 {
-		return msg.MessageThreadId
-	}
-
-	if msg.ReplyToMessage != nil {
-		return msg.ReplyToMessage.MessageId
-	}
-
-	return 0
 }
 
 func newVerificationRandomToken(length int) (string, error) {

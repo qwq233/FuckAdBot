@@ -95,3 +95,29 @@ func TestReminderTTLUsesAtLeastVerifyWindow(t *testing.T) {
 		t.Fatalf("GetReminderTTL() = %v, want %v", got, want)
 	}
 }
+
+func TestOriginalMessageTTLDefaultsToOneMinute(t *testing.T) {
+	t.Parallel()
+
+	cfg := configpkg.ModerationConfig{
+		OriginalMessageTTL: "invalid",
+		VerifyWindow:       "5m",
+	}
+
+	if got, want := cfg.GetOriginalMessageTTL(), time.Minute; got != want {
+		t.Fatalf("GetOriginalMessageTTL() = %v, want %v", got, want)
+	}
+}
+
+func TestOriginalMessageTTLCapsToVerifyWindow(t *testing.T) {
+	t.Parallel()
+
+	cfg := configpkg.ModerationConfig{
+		OriginalMessageTTL: "10m",
+		VerifyWindow:       "5m",
+	}
+
+	if got, want := cfg.GetOriginalMessageTTL(), 5*time.Minute; got != want {
+		t.Fatalf("GetOriginalMessageTTL() = %v, want %v", got, want)
+	}
+}

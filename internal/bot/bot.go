@@ -60,6 +60,7 @@ func (b *Bot) Start() error {
 	dispatcher.AddHandler(handlers.NewCommand("approve", b.cmdApprove))
 	dispatcher.AddHandler(handlers.NewCommand("reject", b.cmdReject))
 	dispatcher.AddHandler(handlers.NewCommand("unreject", b.cmdUnreject))
+	dispatcher.AddHandler(handlers.NewCommand("resetverify", b.cmdResetAllVerify))
 	dispatcher.AddHandler(handlers.NewCommand("stats", b.cmdStats))
 	dispatcher.AddHandler(handlers.NewCommand("start", b.cmdStart))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix(moderationCallbackPrefix), b.handleModerationCallback))

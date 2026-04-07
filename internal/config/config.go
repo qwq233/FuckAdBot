@@ -44,9 +44,10 @@ type BlacklistConfig struct {
 }
 
 type ModerationConfig struct {
-	MaxWarnings  int    `toml:"max_warnings"`
-	ReminderTTL  int    `toml:"reminder_ttl"`
-	VerifyWindow string `toml:"verify_window"`
+	MaxWarnings        int    `toml:"max_warnings"`
+	ReminderTTL        int    `toml:"reminder_ttl"`
+	VerifyWindow       string `toml:"verify_window"`
+	OriginalMessageTTL string `toml:"original_message_ttl"`
 }
 
 type StoreConfig struct {
@@ -99,6 +100,20 @@ func (c *ModerationConfig) GetReminderTTL() time.Duration {
 	return ttl
 }
 
+func (c *ModerationConfig) GetOriginalMessageTTL() time.Duration {
+	ttl, err := time.ParseDuration(c.OriginalMessageTTL)
+	if err != nil || ttl <= 0 {
+		ttl = time.Minute
+	}
+
+	verifyWindow := c.GetVerifyWindow()
+	if ttl > verifyWindow {
+		return verifyWindow
+	}
+
+	return ttl
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -112,9 +127,10 @@ func Load(path string) (*Config, error) {
 			VerifyTimeout: "5m",
 		},
 		Moderation: ModerationConfig{
-			MaxWarnings:  3,
-			ReminderTTL:  30,
-			VerifyWindow: "5m",
+			MaxWarnings:        3,
+			ReminderTTL:        30,
+			VerifyWindow:       "5m",
+			OriginalMessageTTL: "1m",
 		},
 		Store: StoreConfig{
 			Type:       "sqlite",

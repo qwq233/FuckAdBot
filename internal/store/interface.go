@@ -10,6 +10,7 @@ type PendingVerification struct {
 	ExpireAt          time.Time
 	ReminderMessageID int64
 	PrivateMessageID  int64
+	OriginalMessageID int64
 	MessageThreadID   int64
 	ReplyToMessageID  int64
 }
@@ -31,6 +32,7 @@ type Store interface {
 	GetPending(chatID, userID int64) (*PendingVerification, error)
 	SetPending(pending PendingVerification) error
 	ClearPending(chatID, userID int64) error
+	ClearUserVerificationStateEverywhere(userID int64) error
 
 	// Warning count
 	GetWarningCount(chatID, userID int64) (int, error)

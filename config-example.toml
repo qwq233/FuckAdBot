@@ -31,6 +31,10 @@ max_warnings = 3
 # be shorter than verify_window, so the user can still see the button while the
 # current verification window is active.
 reminder_ttl = 30
+# How long to keep the unverified user's original message visible after sending
+# the verification reply. If still unverified when this expires, that original
+# message is deleted. Effective value will never exceed verify_window.
+original_message_ttl = "1m"
 # Duration of each verification window after a reminder
 verify_window = "5m"
 
