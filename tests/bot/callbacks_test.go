@@ -9,7 +9,7 @@ import (
 func TestBuildReminderKeyboardLayout(t *testing.T) {
 	t.Parallel()
 
-	markup := botpkg.BuildReminderKeyboard("https://verify.example.com/verify?uid=1", -100123, 42)
+	markup := botpkg.BuildReminderKeyboard("https://verify.example.com/verify?uid=1", -100123, 42, "zh-cn")
 
 	if len(markup.InlineKeyboard) != 2 {
 		t.Fatalf("row count = %d, want 2", len(markup.InlineKeyboard))
@@ -33,6 +33,24 @@ func TestBuildReminderKeyboardLayout(t *testing.T) {
 
 	if markup.InlineKeyboard[1][1].Text != "🚫 拒绝" {
 		t.Fatalf("right admin button text = %q, want %q", markup.InlineKeyboard[1][1].Text, "🚫 拒绝")
+	}
+}
+
+func TestBuildReminderKeyboardEnglishLayout(t *testing.T) {
+	t.Parallel()
+
+	markup := botpkg.BuildReminderKeyboard("https://verify.example.com/verify?uid=1", -100123, 42, "en-us")
+
+	if markup.InlineKeyboard[0][0].Text != "🛡️ Verify" {
+		t.Fatalf("top verify button text = %q, want %q", markup.InlineKeyboard[0][0].Text, "🛡️ Verify")
+	}
+
+	if markup.InlineKeyboard[1][0].Text != "✅ Approve" {
+		t.Fatalf("left admin button text = %q, want %q", markup.InlineKeyboard[1][0].Text, "✅ Approve")
+	}
+
+	if markup.InlineKeyboard[1][1].Text != "🚫 Reject" {
+		t.Fatalf("right admin button text = %q, want %q", markup.InlineKeyboard[1][1].Text, "🚫 Reject")
 	}
 }
 

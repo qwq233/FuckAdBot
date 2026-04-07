@@ -5,6 +5,7 @@ import "time"
 type PendingVerification struct {
 	ChatID            int64
 	UserID            int64
+	UserLanguage      string
 	Timestamp         int64
 	RandomToken       string
 	ExpireAt          time.Time

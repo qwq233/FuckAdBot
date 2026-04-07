@@ -1,0 +1,73 @@
+scope_global: 全局
+scope_group: 群组
+user_name_fallback: 用户
+detected_language_line: '语言: %s'
+language_name_en: English
+language_name_zh_cn: 简体中文
+usage_addblocklist: '用法: /addblocklist <关键词>'
+usage_delblocklist: '用法: /delblocklist <关键词>'
+keyword_empty: 关键词不能为空
+blacklist_persist_failed: ❌ 持久化黑名单词汇失败
+blacklist_added: '✅ 已添加%s黑名单词汇: <code>%s</code>'
+blacklist_not_found_global: ❌ 未找到该全局黑名单词汇
+blacklist_not_found_group: ❌ 未找到该群组黑名单词汇
+blacklist_delete_failed: ❌ 从数据库删除黑名单词汇失败
+blacklist_removed: '✅ 已移除%s黑名单词汇: <code>%s</code>'
+blacklist_list_title_global: |
+  📋 <b>全局黑名单词汇列表:</b>
+blacklist_list_title_group: |
+  📋 <b>群组黑名单词汇列表:</b>
+blacklist_empty_global: 全局黑名单为空
+blacklist_empty_group: 群组黑名单为空
+invalid_user_id: '无效的用户 ID: %s'
+target_user_required: 请指定用户 ID 或回复目标用户的消息
+approve_failed: ❌ 批准验证失败
+approve_result: '✅ 已批准用户 <code>%d</code> 的验证'
+resetverify_usage: '用法: /resetverify <uid>，或回复目标用户消息后执行 /resetverify'
+resetverify_failed: ❌ 清空用户全部聊天室验证状态失败
+resetverify_success: '✅ 已清空用户 <code>%d</code> 在所有聊天室中的验证状态、待验证记录和警告计数'
+reject_failed: ❌ 拒绝验证失败
+reject_result: '🚫 已拒绝用户 <code>%d</code> 的验证，其消息将被静默删除'
+unreject_failed: ❌ 撤销拒绝失败
+unreject_result: '✅ 已撤销对用户 <code>%d</code> 的拒绝，该用户可重新走验证流程'
+stats_private: |
+  📊 <b>统计信息</b>
+  全局黑名单词汇数: %d
+stats_group: |
+  📊 <b>统计信息</b>
+  全局黑名单词汇数: %d
+  群组黑名单词汇数: %d
+start_help: |-
+  如果您需要完成人机验证，请点击群组中发送给您的验证链接。
+
+  <b>管理员命令:</b>
+  /addblocklist &lt;词汇&gt; - 添加黑名单
+  /delblocklist &lt;词汇&gt; - 移除黑名单
+  /listblocklist - 查看黑名单
+  /approve &lt;uid&gt; - 批准验证
+  /reject &lt;uid&gt; - 拒绝验证
+  /unreject &lt;uid&gt; - 撤销拒绝
+  /resetverify &lt;uid&gt; - 清空用户所有聊天室验证状态(仅超级管理员)
+  /stats - 查看统计
+verify_params_invalid: ❌ 验证参数无效
+verify_link_not_yours: ❌ 该验证链接不属于您
+verify_state_read_failed: ❌ 读取验证状态失败，请稍后重试
+verify_link_expired: ❌ 该验证链接已失效，请回到群组重新触发验证
+verify_blacklist_hit: '❌ 您的 username 或 bio 命中了黑名单词汇：<code>%s</code>，验证已拒绝。'
+verify_service_disabled: ❌ 验证服务未启用
+private_verification_prompt: 请点击下方按钮继续完成人机验证。
+verify_button_open: 🛡️ 打开验证页面
+verify_button_click: 🛡️ 点击验证
+admin_button_approve: ✅ 批准
+admin_button_reject: 🚫 拒绝
+invalid_review_button: 无效的审批按钮
+admin_only_button: 只有管理员可以操作这个按钮
+button_chat_mismatch: 按钮所属聊天与目标不匹配
+callback_approve_failed: 批准失败，请稍后重试
+callback_reject_failed: 拒绝失败，请稍后重试
+callback_approve_result: '✅ 已由管理员批准用户 <code>%d</code> 的验证'
+callback_reject_result: '🚫 已由管理员拒绝用户 <code>%d</code> 的验证，其消息将被静默删除'
+callback_answer_approved: 已批准
+callback_answer_rejected: 已拒绝
+verification_success: '✅ 您已完成群组 <code>%d</code> 的人机验证，现在可以正常发言了。'
+reminder_text: '<a href="tg://user?id=%d">%s</a> 您需要完成人机验证才能发言，请点击下方按钮完成验证。(%d/%d)'

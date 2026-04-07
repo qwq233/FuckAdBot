@@ -15,6 +15,8 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
+const currentSchemaVersion = 2
+
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -47,6 +49,7 @@ func (s *SQLiteStore) migrate() error {
 		`CREATE TABLE IF NOT EXISTS pending_verifications (
 			chat_id   INTEGER NOT NULL,
 			user_id   INTEGER NOT NULL,
+			user_language TEXT NOT NULL DEFAULT 'zh-cn',
 			token_timestamp INTEGER NOT NULL DEFAULT 0,
 			token_rand TEXT NOT NULL DEFAULT '',
 			expire_at DATETIME NOT NULL,
@@ -82,7 +85,7 @@ func (s *SQLiteStore) migrate() error {
 	if err := s.migrateSchemaVersion(); err != nil {
 		return err
 	}
-	if err := s.ensurePendingVerificationColumns(); err != nil {
+	if err := s.ensureLegacyPendingVerificationColumns(); err != nil {
 		return err
 	}
 	if err := s.migrateBlacklistTable(); err != nil {
@@ -97,15 +100,21 @@ func (s *SQLiteStore) migrateSchemaVersion() error {
 		return fmt.Errorf("read user_version: %w", err)
 	}
 
-	switch version {
-	case 0:
-		if err := s.migrateToVersion1(); err != nil {
-			return err
+	for version < currentSchemaVersion {
+		switch version {
+		case 0:
+			if err := s.migrateToVersion1(); err != nil {
+				return err
+			}
+			version = 1
+		case 1:
+			if err := s.migrateToVersion2(); err != nil {
+				return err
+			}
+			version = 2
+		default:
+			return fmt.Errorf("unsupported database schema version: %d", version)
 		}
-	case 1:
-		return nil
-	default:
-		return fmt.Errorf("unsupported database schema version: %d", version)
 	}
 
 	return nil
@@ -118,25 +127,43 @@ func (s *SQLiteStore) migrateToVersion1() error {
 		return fmt.Errorf("migrate database schema from version 0 to 1: %w", err)
 	}
 
-	if _, err := s.db.Exec(`PRAGMA user_version = 1`); err != nil {
+	if err := s.setSchemaVersion(1); err != nil {
 		return fmt.Errorf("set user_version to 1: %w", err)
 	}
 
 	return nil
 }
 
-func (s *SQLiteStore) ensurePendingVerificationColumns() error {
+func (s *SQLiteStore) migrateToVersion2() error {
+	if err := s.addPendingVerificationColumns(map[string]string{
+		"user_language": "TEXT NOT NULL DEFAULT 'zh-cn'",
+	}); err != nil {
+		return fmt.Errorf("migrate database schema from version 1 to 2: %w", err)
+	}
+
+	if err := s.setSchemaVersion(2); err != nil {
+		return fmt.Errorf("set user_version to 2: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) ensureLegacyPendingVerificationColumns() error {
 	requiredColumns := map[string]string{
 		"token_timestamp":     "INTEGER NOT NULL DEFAULT 0",
 		"token_rand":          "TEXT NOT NULL DEFAULT ''",
 		"reminder_message_id": "INTEGER NOT NULL DEFAULT 0",
 		"private_message_id":  "INTEGER NOT NULL DEFAULT 0",
-		"original_message_id": "INTEGER NOT NULL DEFAULT 0",
 		"message_thread_id":   "INTEGER NOT NULL DEFAULT 0",
 		"reply_to_message_id": "INTEGER NOT NULL DEFAULT 0",
 	}
 
 	return s.addPendingVerificationColumns(requiredColumns)
+}
+
+func (s *SQLiteStore) setSchemaVersion(version int) error {
+	_, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, version))
+	return err
 }
 
 func (s *SQLiteStore) addPendingVerificationColumns(requiredColumns map[string]string) error {
@@ -254,12 +281,13 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 	var pending PendingVerification
 	var expireAt string
 	err := s.db.QueryRow(
-		`SELECT chat_id, user_id, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
 		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID,
 	).Scan(
 		&pending.ChatID,
 		&pending.UserID,
+		&pending.UserLanguage,
 		&pending.Timestamp,
 		&pending.RandomToken,
 		&expireAt,
@@ -276,6 +304,10 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 		return nil, err
 	}
 
+	if strings.TrimSpace(pending.UserLanguage) == "" {
+		pending.UserLanguage = "zh-cn"
+	}
+
 	pending.ExpireAt, err = parseSQLiteTime(expireAt)
 	if err != nil {
 		return nil, fmt.Errorf("parse pending expire_at: %w", err)
@@ -285,10 +317,15 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 }
 
 func (s *SQLiteStore) SetPending(pending PendingVerification) error {
+	if strings.TrimSpace(pending.UserLanguage) == "" {
+		pending.UserLanguage = "zh-cn"
+	}
+
 	_, err := s.db.Exec(
 		`INSERT INTO pending_verifications (
 			chat_id,
 			user_id,
+			user_language,
 			token_timestamp,
 			token_rand,
 			expire_at,
@@ -297,8 +334,9 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 			original_message_id,
 			message_thread_id,
 			reply_to_message_id
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(chat_id, user_id) DO UPDATE SET
+		 	user_language = excluded.user_language,
 		 	token_timestamp = excluded.token_timestamp,
 		 	token_rand = excluded.token_rand,
 		 	expire_at = excluded.expire_at,
@@ -309,6 +347,7 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 		 	reply_to_message_id = excluded.reply_to_message_id`,
 		pending.ChatID,
 		pending.UserID,
+		pending.UserLanguage,
 		pending.Timestamp,
 		pending.RandomToken,
 		pending.ExpireAt.UTC().Format(time.DateTime),

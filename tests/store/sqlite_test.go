@@ -87,6 +87,7 @@ func TestSQLiteStorePendingVerificationRoundTrip(t *testing.T) {
 	want := storepkg.PendingVerification{
 		ChatID:            -100123,
 		UserID:            42,
+		UserLanguage:      "en",
 		Timestamp:         1712300000,
 		RandomToken:       "abc123x",
 		ExpireAt:          expireAt,
@@ -109,7 +110,7 @@ func TestSQLiteStorePendingVerificationRoundTrip(t *testing.T) {
 		t.Fatal("GetPending() = nil, want value")
 	}
 
-	if got.ChatID != want.ChatID || got.UserID != want.UserID || got.Timestamp != want.Timestamp || got.RandomToken != want.RandomToken || got.ReminderMessageID != want.ReminderMessageID || got.PrivateMessageID != want.PrivateMessageID || got.OriginalMessageID != want.OriginalMessageID || got.MessageThreadID != want.MessageThreadID || got.ReplyToMessageID != want.ReplyToMessageID {
+	if got.ChatID != want.ChatID || got.UserID != want.UserID || got.UserLanguage != want.UserLanguage || got.Timestamp != want.Timestamp || got.RandomToken != want.RandomToken || got.ReminderMessageID != want.ReminderMessageID || got.PrivateMessageID != want.PrivateMessageID || got.OriginalMessageID != want.OriginalMessageID || got.MessageThreadID != want.MessageThreadID || got.ReplyToMessageID != want.ReplyToMessageID {
 		t.Fatalf("GetPending() = %+v, want %+v", *got, want)
 	}
 
@@ -161,7 +162,7 @@ func TestSQLiteStoreGroupScopedBlacklist(t *testing.T) {
 	}
 }
 
-func TestSQLiteStoreSetsSchemaVersionToOneForFreshDB(t *testing.T) {
+func TestSQLiteStoreSetsSchemaVersionToCurrentForFreshDB(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -182,12 +183,12 @@ func TestSQLiteStoreSetsSchemaVersionToOneForFreshDB(t *testing.T) {
 		t.Fatalf("read user_version error = %v", err)
 	}
 
-	if version != 1 {
-		t.Fatalf("user_version = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("user_version = %d, want 2", version)
 	}
 }
 
-func TestSQLiteStoreMigratesVersionZeroDatabaseToVersionOne(t *testing.T) {
+func TestSQLiteStoreMigratesVersionZeroDatabaseToCurrent(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -258,8 +259,8 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToVersionOne(t *testing.T) {
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("migrated user_version = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("migrated user_version = %d, want 2", version)
 	}
 
 	rows, err := rawDB.Query(`PRAGMA table_info(pending_verifications)`)
@@ -269,6 +270,7 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToVersionOne(t *testing.T) {
 	defer rows.Close()
 
 	foundOriginalMessageID := false
+	foundUserLanguage := false
 	for rows.Next() {
 		var (
 			cid       int
@@ -283,7 +285,9 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToVersionOne(t *testing.T) {
 		}
 		if name == "original_message_id" {
 			foundOriginalMessageID = true
-			break
+		}
+		if name == "user_language" {
+			foundUserLanguage = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -292,6 +296,118 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToVersionOne(t *testing.T) {
 
 	if !foundOriginalMessageID {
 		t.Fatal("pending_verifications missing original_message_id column after migration")
+	}
+	if !foundUserLanguage {
+		t.Fatal("pending_verifications missing user_language column after migration")
+	}
+}
+
+func TestSQLiteStoreMigratesVersionOneDatabaseToVersionTwoWithoutDataLoss(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+
+	seedQueries := []string{
+		`CREATE TABLE user_status (
+			chat_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('verified','rejected')),
+			updated_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (chat_id, user_id)
+		)`,
+		`CREATE TABLE pending_verifications (
+			chat_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			token_timestamp INTEGER NOT NULL DEFAULT 0,
+			token_rand TEXT NOT NULL DEFAULT '',
+			expire_at DATETIME NOT NULL,
+			reminder_message_id INTEGER NOT NULL DEFAULT 0,
+			private_message_id INTEGER NOT NULL DEFAULT 0,
+			original_message_id INTEGER NOT NULL DEFAULT 0,
+			message_thread_id INTEGER NOT NULL DEFAULT 0,
+			reply_to_message_id INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (chat_id, user_id)
+		)`,
+		`CREATE TABLE warnings (
+			chat_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			count INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (chat_id, user_id)
+		)`,
+		`CREATE TABLE blacklist_words (
+			chat_id INTEGER NOT NULL DEFAULT 0,
+			word TEXT NOT NULL,
+			added_by TEXT NOT NULL DEFAULT '',
+			added_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (chat_id, word)
+		)`,
+		`PRAGMA user_version = 1`,
+	}
+
+	for _, query := range seedQueries {
+		if _, err := rawDB.Exec(query); err != nil {
+			t.Fatalf("seed schema error = %v", err)
+		}
+	}
+
+	if _, err := rawDB.Exec(
+		`INSERT INTO pending_verifications (
+			chat_id, user_id, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		-100123, 42, 1712300000, "abc123x", time.Now().UTC().Format(time.DateTime), 7001, 8001, 8101, 9001, 5001,
+	); err != nil {
+		t.Fatalf("seed pending_verifications row error = %v", err)
+	}
+
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("rawDB.Close() error = %v", err)
+	}
+
+	store, err := storepkg.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	rawDB, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error after migration = %v", err)
+	}
+	defer rawDB.Close()
+
+	var version int
+	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read migrated user_version error = %v", err)
+	}
+	if version != 2 {
+		t.Fatalf("migrated user_version = %d, want 2", version)
+	}
+
+	var userLanguage string
+	if err := rawDB.QueryRow(
+		`SELECT user_language FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
+		-100123, 42,
+	).Scan(&userLanguage); err != nil {
+		t.Fatalf("read migrated user_language error = %v", err)
+	}
+	if userLanguage != "zh-cn" {
+		t.Fatalf("migrated user_language = %q, want %q", userLanguage, "zh-cn")
+	}
+
+	pending, err := store.GetPending(-100123, 42)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if pending == nil {
+		t.Fatal("GetPending() = nil, want preserved row")
+	}
+	if pending.Timestamp != 1712300000 || pending.RandomToken != "abc123x" || pending.ReminderMessageID != 7001 || pending.PrivateMessageID != 8001 || pending.OriginalMessageID != 8101 || pending.MessageThreadID != 9001 || pending.ReplyToMessageID != 5001 {
+		t.Fatalf("GetPending() = %+v, preserved fields mismatch", *pending)
 	}
 }
 

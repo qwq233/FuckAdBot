@@ -1,0 +1,73 @@
+scope_global: global
+scope_group: group
+user_name_fallback: User
+detected_language_line: 'Language: %s'
+language_name_en: English
+language_name_zh_cn: Simplified Chinese
+usage_addblocklist: 'Usage: /addblocklist <keyword>'
+usage_delblocklist: 'Usage: /delblocklist <keyword>'
+keyword_empty: Keyword cannot be empty
+blacklist_persist_failed: ❌ Failed to persist the blacklist word
+blacklist_added: '✅ Added %s blacklist word: <code>%s</code>'
+blacklist_not_found_global: ❌ Global blacklist word not found
+blacklist_not_found_group: ❌ Group blacklist word not found
+blacklist_delete_failed: ❌ Failed to delete the blacklist word from the database
+blacklist_removed: '✅ Removed %s blacklist word: <code>%s</code>'
+blacklist_list_title_global: |
+  📋 <b>Global blacklist words:</b>
+blacklist_list_title_group: |
+  📋 <b>Group blacklist words:</b>
+blacklist_empty_global: The global blacklist is empty
+blacklist_empty_group: The group blacklist is empty
+invalid_user_id: 'Invalid user ID: %s'
+target_user_required: Please specify a user ID or reply to the target user's message
+approve_failed: ❌ Failed to approve verification
+approve_result: '✅ Approved verification for user <code>%d</code>'
+resetverify_usage: 'Usage: /resetverify <uid>, or reply to the target user''s message and run /resetverify'
+resetverify_failed: ❌ Failed to clear the user's verification state in all chats
+resetverify_success: '✅ Cleared verification state, pending records, and warning counters for user <code>%d</code> in all chats'
+reject_failed: ❌ Failed to reject verification
+reject_result: '🚫 Rejected verification for user <code>%d</code>; future messages will be silently deleted'
+unreject_failed: ❌ Failed to undo the rejection
+unreject_result: '✅ Removed the rejection for user <code>%d</code>; the user can go through verification again'
+stats_private: |
+  📊 <b>Statistics</b>
+  Global blacklist word count: %d
+stats_group: |
+  📊 <b>Statistics</b>
+  Global blacklist word count: %d
+  Group blacklist word count: %d
+start_help: |-
+  If you need to complete the human verification, open the verification link sent to you in the group.
+
+  <b>Admin commands:</b>
+  /addblocklist &lt;word&gt; - Add a blacklist word
+  /delblocklist &lt;word&gt; - Remove a blacklist word
+  /listblocklist - Show blacklist words
+  /approve &lt;uid&gt; - Approve verification
+  /reject &lt;uid&gt; - Reject verification
+  /unreject &lt;uid&gt; - Undo a rejection
+  /resetverify &lt;uid&gt; - Clear verification state in all chats (super admin only)
+  /stats - Show statistics
+verify_params_invalid: ❌ Invalid verification parameters
+verify_link_not_yours: ❌ This verification link does not belong to you
+verify_state_read_failed: ❌ Failed to read the verification state. Please try again later
+verify_link_expired: ❌ This verification link has expired. Please go back to the group and trigger verification again
+verify_blacklist_hit: '❌ Your username or bio matched a blacklist word: <code>%s</code>. Verification was rejected.'
+verify_service_disabled: ❌ The verification service is not enabled
+private_verification_prompt: Please click the button below to continue the human verification.
+verify_button_open: 🛡️ Open verification page
+verify_button_click: 🛡️ Verify
+admin_button_approve: ✅ Approve
+admin_button_reject: 🚫 Reject
+invalid_review_button: Invalid moderation button
+admin_only_button: Only admins can use this button
+button_chat_mismatch: This button does not belong to the target chat
+callback_approve_failed: Approval failed. Please try again later
+callback_reject_failed: Rejection failed. Please try again later
+callback_approve_result: '✅ An admin approved verification for user <code>%d</code>'
+callback_reject_result: '🚫 An admin rejected verification for user <code>%d</code>; future messages will be silently deleted'
+callback_answer_approved: Approved
+callback_answer_rejected: Rejected
+verification_success: '✅ You have completed the human verification for group <code>%d</code>. You can speak normally now.'
+reminder_text: '<a href="tg://user?id=%d">%s</a>, you need to complete human verification before speaking. Please use the button below. (%d/%d)'

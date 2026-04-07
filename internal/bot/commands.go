@@ -78,11 +78,11 @@ func commandActorLabel(msg *gotgbot.Message) string {
 }
 
 // extractTargetUserID gets a user ID from command args or reply_to_message.
-func extractTargetUserID(msg *gotgbot.Message, args []string) (int64, error) {
+func extractTargetUserID(locale string, msg *gotgbot.Message, args []string) (int64, error) {
 	if len(args) > 0 {
 		id, err := strconv.ParseInt(args[0], 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("无效的用户 ID: %s", args[0])
+			return 0, errors.New(tr(locale, "invalid_user_id", args[0]))
 		}
 		return id, nil
 	}
@@ -91,7 +91,7 @@ func extractTargetUserID(msg *gotgbot.Message, args []string) (int64, error) {
 		return msg.ReplyToMessage.From.Id, nil
 	}
 
-	return 0, fmt.Errorf("请指定用户 ID 或回复目标用户的消息")
+	return 0, errors.New(tr(locale, "target_user_required"))
 }
 
 func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
@@ -99,6 +99,7 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
 	if isPrivate {
@@ -113,7 +114,7 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	args := strings.Fields(msg.Text)
 	if len(args) < 2 {
-		bot.SendMessage(msg.Chat.Id, "用法: /addblocklist <关键词>", &gotgbot.SendMessageOpts{
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "usage_addblocklist"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
@@ -121,7 +122,7 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	word := strings.TrimSpace(strings.Join(args[1:], " "))
 	if word == "" {
-		bot.SendMessage(msg.Chat.Id, "关键词不能为空", &gotgbot.SendMessageOpts{
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "keyword_empty"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
@@ -131,11 +132,11 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	var scopeLabel string
 	if isPrivate {
 		scopeChatID = 0
-		scopeLabel = "全局"
+		scopeLabel = tr(requestLanguage, "scope_global")
 		b.Blacklist.Add(word)
 	} else {
 		scopeChatID = msg.Chat.Id
-		scopeLabel = "群组"
+		scopeLabel = tr(requestLanguage, "scope_group")
 		b.Blacklist.AddGroup(scopeChatID, word)
 	}
 
@@ -146,13 +147,13 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 		} else {
 			b.Blacklist.RemoveGroup(scopeChatID, word)
 		}
-		bot.SendMessage(msg.Chat.Id, "❌ 持久化黑名单词汇失败", &gotgbot.SendMessageOpts{
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "blacklist_persist_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
 	}
 
-	reply := fmt.Sprintf("✅ 已添加%s黑名单词汇: <code>%s</code>", scopeLabel, escapeHTML(word))
+	reply := tr(requestLanguage, "blacklist_added", scopeLabel, escapeHTML(word))
 	bot.SendMessage(msg.Chat.Id, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
@@ -166,6 +167,7 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
 	if isPrivate {
@@ -180,7 +182,7 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	args := strings.Fields(msg.Text)
 	if len(args) < 2 {
-		bot.SendMessage(msg.Chat.Id, "用法: /delblocklist <关键词>", &gotgbot.SendMessageOpts{
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "usage_delblocklist"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
@@ -188,7 +190,7 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	word := strings.TrimSpace(strings.Join(args[1:], " "))
 	if word == "" {
-		bot.SendMessage(msg.Chat.Id, "关键词不能为空", &gotgbot.SendMessageOpts{
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "keyword_empty"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
@@ -198,18 +200,18 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	var scopeLabel string
 	if isPrivate {
 		scopeChatID = 0
-		scopeLabel = "全局"
+		scopeLabel = tr(requestLanguage, "scope_global")
 		if !b.Blacklist.Remove(word) {
-			bot.SendMessage(msg.Chat.Id, "❌ 未找到该全局黑名单词汇", &gotgbot.SendMessageOpts{
+			bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "blacklist_not_found_global"), &gotgbot.SendMessageOpts{
 				MessageThreadId: msg.MessageThreadId,
 			})
 			return nil
 		}
 	} else {
 		scopeChatID = msg.Chat.Id
-		scopeLabel = "群组"
+		scopeLabel = tr(requestLanguage, "scope_group")
 		if !b.Blacklist.RemoveGroup(scopeChatID, word) {
-			bot.SendMessage(msg.Chat.Id, "❌ 未找到该群组黑名单词汇", &gotgbot.SendMessageOpts{
+			bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "blacklist_not_found_group"), &gotgbot.SendMessageOpts{
 				MessageThreadId: msg.MessageThreadId,
 			})
 			return nil
@@ -223,13 +225,13 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 		} else {
 			b.Blacklist.AddGroup(scopeChatID, word)
 		}
-		bot.SendMessage(msg.Chat.Id, "❌ 从数据库删除黑名单词汇失败", &gotgbot.SendMessageOpts{
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "blacklist_delete_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
 	}
 
-	reply := fmt.Sprintf("✅ 已移除%s黑名单词汇: <code>%s</code>", scopeLabel, escapeHTML(word))
+	reply := tr(requestLanguage, "blacklist_removed", scopeLabel, escapeHTML(word))
 	bot.SendMessage(msg.Chat.Id, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
@@ -243,6 +245,7 @@ func (b *Bot) cmdListBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
 	if isPrivate {
@@ -259,19 +262,19 @@ func (b *Bot) cmdListBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	var title string
 	if isPrivate {
 		words = b.Blacklist.List()
-		title = "📋 <b>全局黑名单词汇列表:</b>\n"
+		title = tr(requestLanguage, "blacklist_list_title_global")
 	} else {
 		words = b.Blacklist.ListGroup(msg.Chat.Id)
-		title = "📋 <b>群组黑名单词汇列表:</b>\n"
+		title = tr(requestLanguage, "blacklist_list_title_group")
 	}
 
 	if len(words) == 0 {
 		if isPrivate {
-			bot.SendMessage(msg.Chat.Id, "全局黑名单为空", &gotgbot.SendMessageOpts{
+			bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "blacklist_empty_global"), &gotgbot.SendMessageOpts{
 				MessageThreadId: msg.MessageThreadId,
 			})
 		} else {
-			bot.SendMessage(msg.Chat.Id, "群组黑名单为空", &gotgbot.SendMessageOpts{
+			bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "blacklist_empty_group"), &gotgbot.SendMessageOpts{
 				MessageThreadId: msg.MessageThreadId,
 			})
 		}
@@ -297,13 +300,14 @@ func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg == nil {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(msg.From)
 
 	if !b.canApproveFromMessage(bot, msg) {
 		return nil
 	}
 
 	args := strings.Fields(msg.Text)
-	userID, err := extractTargetUserID(msg, args[1:])
+	userID, err := extractTargetUserID(requestLanguage, msg, args[1:])
 	if err != nil {
 		bot.SendMessage(msg.Chat.Id, err.Error(), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
@@ -312,17 +316,18 @@ func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	chatID := msg.Chat.Id
+	targetLanguage := b.targetUserLanguage(chatID, userID)
 
 	if err := b.approveUser(chatID, userID); err != nil {
 		log.Printf("[bot] approveUser error: %v", err)
-		bot.SendMessage(chatID, "❌ 批准验证失败", &gotgbot.SendMessageOpts{
+		bot.SendMessage(chatID, tr(requestLanguage, "approve_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
 	}
 	log.Printf("[bot] manual approve via command: admin=%s target=%d chat=%d", commandActorLabel(msg), userID, chatID)
 
-	reply := fmt.Sprintf("✅ 已批准用户 <code>%d</code> 的验证", userID)
+	reply := appendDetectedLanguageLine(tr(requestLanguage, "approve_result", userID), targetLanguage, requestLanguage)
 	resp, err := bot.SendMessage(chatID, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
@@ -341,11 +346,12 @@ func (b *Bot) cmdResetAllVerify(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg == nil || msg.From == nil || !b.isBotAdmin(msg.From.Id) {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(msg.From)
 
 	args := strings.Fields(msg.Text)
-	userID, err := extractTargetUserID(msg, args[1:])
+	userID, err := extractTargetUserID(requestLanguage, msg, args[1:])
 	if err != nil {
-		bot.SendMessage(msg.Chat.Id, "用法: /resetallverify <uid>，或回复目标用户消息后执行 /resetallverify", &gotgbot.SendMessageOpts{
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "resetverify_usage"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
@@ -353,14 +359,14 @@ func (b *Bot) cmdResetAllVerify(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	if err := b.Store.ClearUserVerificationStateEverywhere(userID); err != nil {
 		log.Printf("[bot] ClearUserVerificationStateEverywhere error: %v", err)
-		bot.SendMessage(msg.Chat.Id, "❌ 清空用户全部聊天室验证状态失败", &gotgbot.SendMessageOpts{
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "resetverify_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
 	}
 
 	log.Printf("[bot] reset all verification state via command: admin=%d target=%d", msg.From.Id, userID)
-	bot.SendMessage(msg.Chat.Id, fmt.Sprintf("✅ 已清空用户 <code>%d</code> 在所有聊天室中的验证状态、待验证记录和警告计数", userID), &gotgbot.SendMessageOpts{
+	bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "resetverify_success", userID), &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
 	})
@@ -373,13 +379,14 @@ func (b *Bot) cmdReject(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(msg.From)
 
 	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
 		return nil
 	}
 
 	args := strings.Fields(msg.Text)
-	userID, err := extractTargetUserID(msg, args[1:])
+	userID, err := extractTargetUserID(requestLanguage, msg, args[1:])
 	if err != nil {
 		bot.SendMessage(msg.Chat.Id, err.Error(), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
@@ -388,17 +395,18 @@ func (b *Bot) cmdReject(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	chatID := msg.Chat.Id
+	targetLanguage := b.targetUserLanguage(chatID, userID)
 
 	if err := b.rejectUser(chatID, userID); err != nil {
 		log.Printf("[bot] rejectUser error: %v", err)
-		bot.SendMessage(chatID, "❌ 拒绝验证失败", &gotgbot.SendMessageOpts{
+		bot.SendMessage(chatID, tr(requestLanguage, "reject_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
 	}
 	log.Printf("[bot] manual reject via command: admin=%d target=%d chat=%d", msg.From.Id, userID, chatID)
 
-	reply := fmt.Sprintf("🚫 已拒绝用户 <code>%d</code> 的验证，其消息将被静默删除", userID)
+	reply := appendDetectedLanguageLine(tr(requestLanguage, "reject_result", userID), targetLanguage, requestLanguage)
 	resp, err := bot.SendMessage(chatID, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
@@ -417,13 +425,14 @@ func (b *Bot) cmdUnreject(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(msg.From)
 
 	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
 		return nil
 	}
 
 	args := strings.Fields(msg.Text)
-	userID, err := extractTargetUserID(msg, args[1:])
+	userID, err := extractTargetUserID(requestLanguage, msg, args[1:])
 	if err != nil {
 		bot.SendMessage(msg.Chat.Id, err.Error(), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
@@ -432,16 +441,17 @@ func (b *Bot) cmdUnreject(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	chatID := msg.Chat.Id
+	targetLanguage := b.targetUserLanguage(chatID, userID)
 
 	if err := b.unrejectUser(chatID, userID); err != nil {
 		log.Printf("[bot] unrejectUser error: %v", err)
-		bot.SendMessage(chatID, "❌ 撤销拒绝失败", &gotgbot.SendMessageOpts{
+		bot.SendMessage(chatID, tr(requestLanguage, "unreject_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
 		return nil
 	}
 
-	reply := fmt.Sprintf("✅ 已撤销对用户 <code>%d</code> 的拒绝，该用户可重新走验证流程", userID)
+	reply := appendDetectedLanguageLine(tr(requestLanguage, "unreject_result", userID), targetLanguage, requestLanguage)
 	bot.SendMessage(chatID, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
 		MessageThreadId: msg.MessageThreadId,
@@ -455,6 +465,7 @@ func (b *Bot) cmdStats(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(msg.From)
 
 	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
 		return nil
@@ -463,10 +474,10 @@ func (b *Bot) cmdStats(bot *gotgbot.Bot, ctx *ext.Context) error {
 	words := b.Blacklist.List()
 	var reply string
 	if msg.Chat.Type == "private" {
-		reply = fmt.Sprintf("📊 <b>统计信息</b>\n全局黑名单词汇数: %d", len(words))
+		reply = tr(requestLanguage, "stats_private", len(words))
 	} else {
 		groupWords := b.Blacklist.ListGroup(msg.Chat.Id)
-		reply = fmt.Sprintf("📊 <b>统计信息</b>\n全局黑名单词汇数: %d\n群组黑名单词汇数: %d", len(words), len(groupWords))
+		reply = tr(requestLanguage, "stats_group", len(words), len(groupWords))
 	}
 	bot.SendMessage(msg.Chat.Id, reply, &gotgbot.SendMessageOpts{
 		ParseMode:       "HTML",
@@ -481,51 +492,49 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg == nil || msg.Chat.Type != "private" {
 		return nil
 	}
+	requestLanguage := defaultUserLanguage
+	if msg.From != nil {
+		requestLanguage = userLanguageFromUser(msg.From)
+	}
 
 	args := ctx.Args()
 	if len(args) > 1 && strings.HasPrefix(args[1], verificationStartPayloadPrefix+"_") {
 		return b.handleVerificationStart(bot, msg, args[1])
 	}
 
-	bot.SendMessage(msg.Chat.Id,
-		"如果您需要完成人机验证，请点击群组中发送给您的验证链接。\n\n"+
-			"<b>管理员命令:</b>\n"+
-			"/addblocklist &lt;词汇&gt; - 添加黑名单\n"+
-			"/delblocklist &lt;词汇&gt; - 移除黑名单\n"+
-			"/listblocklist - 查看黑名单\n"+
-			"/approve &lt;uid&gt; - 批准验证\n"+
-			"/reject &lt;uid&gt; - 拒绝验证\n"+
-			"/unreject &lt;uid&gt; - 撤销拒绝\n"+
-			"/resetallverify &lt;uid&gt; - 清空用户所有聊天室验证状态(仅超级管理员)\n"+
-			"/stats - 查看统计",
-		&gotgbot.SendMessageOpts{ParseMode: "HTML"},
-	)
+	bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "start_help"), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 
 	return nil
 }
 
 func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, payload string) error {
+	requestLanguage := defaultUserLanguage
+	if msg.From != nil {
+		requestLanguage = userLanguageFromUser(msg.From)
+	}
+
 	chatID, userID, verificationInfoID, err := ParseVerificationStartPayload(payload)
 	if err != nil {
-		bot.SendMessage(msg.Chat.Id, "❌ 验证参数无效", nil)
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_params_invalid"), nil)
 		return nil
 	}
 
 	if msg.From == nil || msg.From.Id != userID {
-		bot.SendMessage(msg.Chat.Id, "❌ 该验证链接不属于您", nil)
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_link_not_yours"), nil)
 		return nil
 	}
 
 	pending, err := b.Store.GetPending(chatID, userID)
 	if err != nil {
 		log.Printf("[bot] store.GetPending error in /start: %v", err)
-		bot.SendMessage(msg.Chat.Id, "❌ 读取验证状态失败，请稍后重试", nil)
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_state_read_failed"), nil)
 		return nil
 	}
 	if pending == nil || pending.ReminderMessageID != verificationInfoID || !pending.ExpireAt.After(time.Now().UTC()) {
-		bot.SendMessage(msg.Chat.Id, "❌ 该验证链接已失效，请回到群组重新触发验证", nil)
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_link_expired"), nil)
 		return nil
 	}
+	requestLanguage = userLanguageFromUser(msg.From)
 
 	checkText := buildCheckText(msg.From)
 	if chat, err := bot.GetChat(userID, nil); err == nil && chat.Bio != "" {
@@ -546,12 +555,12 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 		if _, err := bot.BanChatMember(chatID, userID, &gotgbot.BanChatMemberOpts{}); err != nil {
 			log.Printf("[bot] ban user after /start blacklist hit error: %v", err)
 		}
-		bot.SendMessage(msg.Chat.Id, fmt.Sprintf("❌ 您的 username 或 bio 命中了黑名单词汇：<code>%s</code>，验证已拒绝。", escapeHTML(matched)), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_blacklist_hit", escapeHTML(matched)), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 		return nil
 	}
 
 	if b.Captcha == nil {
-		bot.SendMessage(msg.Chat.Id, "❌ 验证服务未启用", nil)
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_service_disabled"), nil)
 		return nil
 	}
 
@@ -563,11 +572,11 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 	}
 
 	privateVerificationMsg, err := bot.SendMessage(msg.Chat.Id,
-		"请点击下方按钮继续完成人机验证。",
+		tr(requestLanguage, "private_verification_prompt"),
 		&gotgbot.SendMessageOpts{
 			ReplyMarkup: gotgbot.InlineKeyboardMarkup{
 				InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
-					{Text: "🛡️ 打开验证页面", Url: verifyURL},
+					{Text: tr(requestLanguage, "verify_button_open"), Url: verifyURL},
 				}},
 			},
 		},
@@ -578,6 +587,7 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 	}
 
 	pending.PrivateMessageID = privateVerificationMsg.MessageId
+	pending.UserLanguage = requestLanguage
 	if err := b.Store.SetPending(*pending); err != nil {
 		log.Printf("[bot] store.SetPending error after private verification message: %v", err)
 	}

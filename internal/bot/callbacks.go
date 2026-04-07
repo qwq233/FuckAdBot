@@ -13,15 +13,15 @@ import (
 const moderationCallbackPrefix = "review:"
 
 // BuildReminderKeyboard builds the inline keyboard for a verification reminder.
-func BuildReminderKeyboard(verifyURL string, chatID, userID int64) gotgbot.InlineKeyboardMarkup {
+func BuildReminderKeyboard(verifyURL string, chatID, userID int64, userLanguage string) gotgbot.InlineKeyboardMarkup {
 	return gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{
-			{{Text: "🛡️ 点击验证", Url: verifyURL}},
+			{{Text: tr(userLanguage, "verify_button_click"), Url: verifyURL}},
 			{{
-				Text:         "✅ 批准",
+				Text:         tr(userLanguage, "admin_button_approve"),
 				CallbackData: BuildModerationCallbackData("a", chatID, userID),
 			}, {
-				Text:         "🚫 拒绝",
+				Text:         tr(userLanguage, "admin_button_reject"),
 				CallbackData: BuildModerationCallbackData("r", chatID, userID),
 			}},
 		},
@@ -67,19 +67,21 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 	if cq == nil {
 		return nil
 	}
+	requestLanguage := userLanguageFromUser(&cq.From)
 
 	action, chatID, userID, err := ParseModerationCallbackData(cq.Data)
 	if err != nil {
 		_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
-			Text:      "无效的审批按钮",
+			Text:      tr(requestLanguage, "invalid_review_button"),
 			ShowAlert: true,
 		})
 		return nil
 	}
+	targetLanguage := b.targetUserLanguage(chatID, userID)
 
 	if !b.isAdmin(bot, chatID, cq.From.Id) {
 		_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
-			Text:      "只有管理员可以操作这个按钮",
+			Text:      tr(requestLanguage, "admin_only_button"),
 			ShowAlert: true,
 		})
 		return nil
@@ -87,7 +89,7 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 
 	if cq.Message != nil && cq.Message.GetChat().Id != chatID {
 		_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
-			Text:      "按钮所属聊天与目标不匹配",
+			Text:      tr(requestLanguage, "button_chat_mismatch"),
 			ShowAlert: true,
 		})
 		return nil
@@ -103,26 +105,26 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 		if err := b.approveUser(chatID, userID); err != nil {
 			log.Printf("[bot] approveUser callback error: %v", err)
 			_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
-				Text:      "批准失败，请稍后重试",
+				Text:      tr(requestLanguage, "callback_approve_failed"),
 				ShowAlert: true,
 			})
 			return nil
 		}
 		log.Printf("[bot] manual approve via callback: admin=%d target=%d chat=%d", cq.From.Id, userID, chatID)
-		messageText = fmt.Sprintf("✅ 已由管理员批准用户 <code>%d</code> 的验证", userID)
-		answerText = "已批准"
+		messageText = appendDetectedLanguageLine(tr(targetLanguage, "callback_approve_result", userID), targetLanguage, targetLanguage)
+		answerText = tr(requestLanguage, "callback_answer_approved")
 	case "r":
 		if err := b.rejectUser(chatID, userID); err != nil {
 			log.Printf("[bot] rejectUser callback error: %v", err)
 			_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
-				Text:      "拒绝失败，请稍后重试",
+				Text:      tr(requestLanguage, "callback_reject_failed"),
 				ShowAlert: true,
 			})
 			return nil
 		}
 		log.Printf("[bot] manual reject via callback: admin=%d target=%d chat=%d", cq.From.Id, userID, chatID)
-		messageText = fmt.Sprintf("🚫 已由管理员拒绝用户 <code>%d</code> 的验证，其消息将被静默删除", userID)
-		answerText = "已拒绝"
+		messageText = appendDetectedLanguageLine(tr(targetLanguage, "callback_reject_result", userID), targetLanguage, targetLanguage)
+		answerText = tr(requestLanguage, "callback_answer_rejected")
 	}
 
 	if cq.Message != nil {

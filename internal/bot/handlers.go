@@ -25,6 +25,7 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	user := msg.From
 	chatID := msg.Chat.Id
+	userLanguage := userLanguageFromUser(user)
 
 	// --- Bot admins bypass all checks ---
 	if b.isBotAdmin(user.Id) {
@@ -121,10 +122,11 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	// Build reminder message with hidden username
-	maskedName := maskName(user.FirstName)
-	reminderText := fmt.Sprintf(
-		`<a href="tg://user?id=%d">%s</a> 您需要完成人机验证才能发言，请点击下方按钮完成验证。(%d/%d)`,
-		user.Id, maskedName, warnCount+1, maxWarnings,
+	maskedName := maskName(user.FirstName, userLanguage)
+	reminderText := appendDetectedLanguageLine(
+		tr(userLanguage, "reminder_text", user.Id, maskedName, warnCount+1, maxWarnings),
+		userLanguage,
+		userLanguage,
 	)
 
 	// Send reminder in the same comment thread
@@ -152,6 +154,7 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if err := b.Store.SetPending(store.PendingVerification{
 		ChatID:            chatID,
 		UserID:            user.Id,
+		UserLanguage:      userLanguage,
 		Timestamp:         timestamp,
 		RandomToken:       randomToken,
 		ExpireAt:          expireAt,
@@ -168,7 +171,7 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	verificationStartURL := BuildVerificationStartURL(bot.Username, chatID, user.Id, reminderMsg.MessageId)
 	if _, _, err := reminderMsg.EditReplyMarkup(bot, &gotgbot.EditMessageReplyMarkupOpts{
-		ReplyMarkup: BuildReminderKeyboard(verificationStartURL, chatID, user.Id),
+		ReplyMarkup: BuildReminderKeyboard(verificationStartURL, chatID, user.Id, userLanguage),
 	}); err != nil {
 		log.Printf("[bot] edit reminder message reply markup error: %v", err)
 	}
@@ -303,13 +306,13 @@ func newVerificationRandomToken(length int) (string, error) {
 }
 
 // maskName returns the first rune of the name followed by "**".
-func maskName(name string) string {
+func maskName(name, locale string) string {
 	if name == "" {
-		return "用户"
+		return tr(locale, "user_name_fallback")
 	}
 	r, _ := utf8.DecodeRuneInString(name)
 	if r == utf8.RuneError {
-		return "用户"
+		return tr(locale, "user_name_fallback")
 	}
 	return string(r) + "**"
 }
