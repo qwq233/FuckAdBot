@@ -66,3 +66,38 @@ func TestParseModerationCallbackData(t *testing.T) {
 		t.Fatalf("parsed values = (%q, %d, %d), want (%q, %d, %d)", action, chatID, userID, "a", int64(-100123), int64(42))
 	}
 }
+
+func TestBuildLanguagePreferenceKeyboardLayout(t *testing.T) {
+	t.Parallel()
+
+	markup := botpkg.BuildLanguagePreferenceKeyboard("zh-cn")
+
+	if len(markup.InlineKeyboard) != 1 {
+		t.Fatalf("row count = %d, want 1", len(markup.InlineKeyboard))
+	}
+
+	if len(markup.InlineKeyboard[0]) != 2 {
+		t.Fatalf("button count = %d, want 2", len(markup.InlineKeyboard[0]))
+	}
+
+	if markup.InlineKeyboard[0][0].Text != "简体中文" {
+		t.Fatalf("first language button text = %q, want %q", markup.InlineKeyboard[0][0].Text, "简体中文")
+	}
+
+	if markup.InlineKeyboard[0][1].Text != "English" {
+		t.Fatalf("second language button text = %q, want %q", markup.InlineKeyboard[0][1].Text, "English")
+	}
+}
+
+func TestParseLanguagePreferenceCallbackData(t *testing.T) {
+	t.Parallel()
+
+	language, err := botpkg.ParseLanguagePreferenceCallbackData(botpkg.BuildLanguagePreferenceCallbackData("en-us"))
+	if err != nil {
+		t.Fatalf("ParseLanguagePreferenceCallbackData() error = %v", err)
+	}
+
+	if language != "en" {
+		t.Fatalf("language = %q, want %q", language, "en")
+	}
+}

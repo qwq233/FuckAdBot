@@ -37,8 +37,17 @@ stats_group: |
   📊 <b>Statistics</b>
   Global blacklist word count: %d
   Group blacklist word count: %d
+lang_prompt: |
+  Choose your preferred language:
+lang_updated: '✅ Preferred language updated to: %s'
+lang_callback_updated: Language preference updated
+lang_invalid: ❌ Invalid language. Your preference was not changed
+lang_update_failed: ❌ Failed to update your language preference. Please try again later
+lang_private_only: This button can only be used in private chat
 start_help: |-
   If you need to complete the human verification, open the verification link sent to you in the group.
+
+  /lang - Change your preferred language
 
   <b>Admin commands:</b>
   /addblocklist &lt;word&gt; - Add a blacklist word

@@ -37,8 +37,17 @@ stats_group: |
   📊 <b>统计信息</b>
   全局黑名单词汇数: %d
   群组黑名单词汇数: %d
+lang_prompt: |
+  请选择你偏好的语言：
+lang_updated: '✅ 已将偏好语言更新为: %s'
+lang_callback_updated: 已更新语言偏好
+lang_invalid: ❌ 无效的语言，不会修改当前偏好
+lang_update_failed: ❌ 更新语言偏好失败，请稍后重试
+lang_private_only: 这个按钮只能在私聊中使用
 start_help: |-
   如果您需要完成人机验证，请点击群组中发送给您的验证链接。
+
+  /lang - 修改偏好语言
 
   <b>管理员命令:</b>
   /addblocklist &lt;词汇&gt; - 添加黑名单

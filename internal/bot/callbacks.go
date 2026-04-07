@@ -11,6 +11,7 @@ import (
 )
 
 const moderationCallbackPrefix = "review:"
+const languagePreferenceCallbackPrefix = "lang:"
 
 // BuildReminderKeyboard builds the inline keyboard for a verification reminder.
 func BuildReminderKeyboard(verifyURL string, chatID, userID int64, userLanguage string) gotgbot.InlineKeyboardMarkup {
@@ -62,12 +63,43 @@ func ParseModerationCallbackData(data string) (string, int64, int64, error) {
 	return action, chatID, userID, nil
 }
 
+func BuildLanguagePreferenceKeyboard(viewerLanguage string) gotgbot.InlineKeyboardMarkup {
+	buttons := make([]gotgbot.InlineKeyboardButton, 0, len(supportedUserLanguages))
+	for _, language := range supportedUserLanguages {
+		buttons = append(buttons, gotgbot.InlineKeyboardButton{
+			Text:         localizedLanguageName(language, viewerLanguage),
+			CallbackData: BuildLanguagePreferenceCallbackData(language),
+		})
+	}
+
+	return gotgbot.InlineKeyboardMarkup{
+		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{buttons},
+	}
+}
+
+func BuildLanguagePreferenceCallbackData(language string) string {
+	return languagePreferenceCallbackPrefix + normalizeUserLanguage(language)
+}
+
+func ParseLanguagePreferenceCallbackData(data string) (string, error) {
+	if !strings.HasPrefix(data, languagePreferenceCallbackPrefix) {
+		return "", fmt.Errorf("invalid language callback prefix")
+	}
+
+	language, ok := resolveSupportedUserLanguage(strings.TrimPrefix(data, languagePreferenceCallbackPrefix))
+	if !ok {
+		return "", fmt.Errorf("invalid language callback value")
+	}
+
+	return language, nil
+}
+
 func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 	cq := ctx.CallbackQuery
 	if cq == nil {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(&cq.From)
+	requestLanguage := b.requestLanguageForUser(&cq.From)
 
 	action, chatID, userID, err := ParseModerationCallbackData(cq.Data)
 	if err != nil {
@@ -142,5 +174,60 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 	}
 
 	_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: answerText})
+	return nil
+}
+
+func (b *Bot) handleLanguagePreferenceCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
+	cq := ctx.CallbackQuery
+	if cq == nil {
+		return nil
+	}
+
+	requestLanguage := b.requestLanguageForUser(&cq.From)
+	if cq.Message == nil || cq.Message.GetChat().Type != "private" || cq.Message.GetChat().Id != cq.From.Id {
+		_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
+			Text:      tr(requestLanguage, "lang_private_only"),
+			ShowAlert: true,
+		})
+		return nil
+	}
+
+	language, err := ParseLanguagePreferenceCallbackData(cq.Data)
+	if err != nil {
+		_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
+			Text:      tr(requestLanguage, "lang_invalid"),
+			ShowAlert: true,
+		})
+		return nil
+	}
+
+	selectedLanguage, changed, err := b.applyUserLanguagePreference(cq.From.Id, language)
+	if err != nil {
+		log.Printf("[bot] store.SetUserLanguagePreference error: %v", err)
+		_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
+			Text:      tr(requestLanguage, "lang_update_failed"),
+			ShowAlert: true,
+		})
+		return nil
+	}
+	if !changed {
+		_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
+			Text:      tr(requestLanguage, "lang_invalid"),
+			ShowAlert: true,
+		})
+		return nil
+	}
+
+	updatedText := tr(selectedLanguage, "lang_updated", localizedLanguageName(selectedLanguage, selectedLanguage))
+	if cq.Message != nil {
+		_, _, err = cq.Message.EditText(bot, updatedText, &gotgbot.EditMessageTextOpts{
+			ReplyMarkup: gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{}},
+		})
+		if err != nil {
+			log.Printf("[bot] edit language preference message error: %v", err)
+		}
+	}
+
+	_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: tr(selectedLanguage, "lang_callback_updated")})
 	return nil
 }

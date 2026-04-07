@@ -25,7 +25,7 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	user := msg.From
 	chatID := msg.Chat.Id
-	userLanguage := userLanguageFromUser(user)
+	userLanguage := b.requestLanguageForUser(user)
 
 	// --- Bot admins bypass all checks ---
 	if b.isBotAdmin(user.Id) {
@@ -36,10 +36,10 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	checkText := buildCheckText(user)
 
 	// Best-effort bio fetch
-	if bioChat, err := bot.GetChat(user.Id, nil); err == nil {
-		if bioChat.Bio != "" {
-			checkText += " " + bioChat.Bio
-		}
+	if bioChat := b.cachedUserChat(user.Id, func(userID int64) (*gotgbot.ChatFullInfo, error) {
+		return bot.GetChat(userID, nil)
+	}); bioChat != nil && bioChat.Bio != "" {
+		checkText += " " + bioChat.Bio
 	}
 
 	if matched := b.Blacklist.MatchWithGroup(chatID, checkText); matched != "" {

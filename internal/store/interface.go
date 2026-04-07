@@ -19,6 +19,10 @@ type PendingVerification struct {
 type Store interface {
 	Close() error
 
+	// User preferences
+	GetUserLanguagePreference(userID int64) (string, error)
+	SetUserLanguagePreference(userID int64, language string) error
+
 	// User verification status: verified / rejected / none
 	IsVerified(chatID, userID int64) (bool, error)
 	SetVerified(chatID, userID int64) error

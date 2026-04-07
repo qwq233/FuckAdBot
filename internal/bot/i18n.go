@@ -4,8 +4,10 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/qwq233/fuckadbot/internal/store"
@@ -24,18 +26,31 @@ var localeCatalogs embed.FS
 
 var translations = mustLoadTranslations()
 
-func normalizeUserLanguage(code string) string {
+var supportedUserLanguages = []string{defaultUserLanguage, englishUserLanguage}
+
+func resolveSupportedUserLanguage(code string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(code))
 	normalized = strings.ReplaceAll(normalized, "_", "-")
+	if normalized == "" {
+		return "", false
+	}
 
 	switch {
 	case strings.HasPrefix(normalized, englishUserLanguage):
-		return englishUserLanguage
-	case normalized == "", strings.HasPrefix(normalized, "zh"):
-		return defaultUserLanguage
+		return englishUserLanguage, true
+	case normalized == "zh", strings.HasPrefix(normalized, "zh-"):
+		return defaultUserLanguage, true
 	default:
-		return defaultUserLanguage
+		return "", false
 	}
+}
+
+func normalizeUserLanguage(code string) string {
+	if normalized, ok := resolveSupportedUserLanguage(code); ok {
+		return normalized
+	}
+
+	return defaultUserLanguage
 }
 
 func userLanguageFromUser(user *gotgbot.User) string {
@@ -52,12 +67,81 @@ func userLanguageFromPending(pending *store.PendingVerification) string {
 	return normalizeUserLanguage(pending.UserLanguage)
 }
 
-func (b *Bot) targetUserLanguage(chatID, userID int64) string {
-	pending, err := b.Store.GetPending(chatID, userID)
-	if err != nil || pending == nil {
+func (b *Bot) preferredUserLanguage(userID int64) string {
+	if b == nil || b.Store == nil || userID == 0 {
+		return ""
+	}
+
+	now := time.Now()
+	if entry, ok := b.cache.getLanguagePreference(userID, now); ok {
+		if entry.hasPreference {
+			return entry.language
+		}
+		return ""
+	}
+
+	preferredLanguage, err := b.Store.GetUserLanguagePreference(userID)
+	if err != nil {
+		log.Printf("[bot] store.GetUserLanguagePreference error: %v", err)
+		return ""
+	}
+
+	cacheEntry := cachedLanguagePreference{
+		hasPreference: preferredLanguage != "",
+		expiresAt:     now.Add(preferredUserLanguageCacheTTL),
+	}
+	if preferredLanguage == "" {
+		b.cache.setLanguagePreference(userID, cacheEntry)
+		return ""
+	}
+
+	cacheEntry.language = normalizeUserLanguage(preferredLanguage)
+	b.cache.setLanguagePreference(userID, cacheEntry)
+	return cacheEntry.language
+}
+
+func (b *Bot) requestLanguageForUser(user *gotgbot.User) string {
+	if user == nil {
 		return defaultUserLanguage
 	}
-	return userLanguageFromPending(pending)
+
+	if preferredLanguage := b.preferredUserLanguage(user.Id); preferredLanguage != "" {
+		return preferredLanguage
+	}
+
+	return userLanguageFromUser(user)
+}
+
+func (b *Bot) applyUserLanguagePreference(userID int64, input string) (string, bool, error) {
+	language, ok := resolveSupportedUserLanguage(input)
+	if !ok {
+		return "", false, nil
+	}
+
+	if err := b.Store.SetUserLanguagePreference(userID, language); err != nil {
+		return "", false, err
+	}
+
+	b.cache.setLanguagePreference(userID, cachedLanguagePreference{
+		language:      language,
+		hasPreference: true,
+		expiresAt:     time.Now().Add(preferredUserLanguageCacheTTL),
+	})
+
+	return language, true, nil
+}
+
+func (b *Bot) targetUserLanguage(chatID, userID int64) string {
+	pending, err := b.Store.GetPending(chatID, userID)
+	if err == nil && pending != nil {
+		return userLanguageFromPending(pending)
+	}
+
+	if preferredLanguage := b.preferredUserLanguage(userID); preferredLanguage != "" {
+		return preferredLanguage
+	}
+
+	return defaultUserLanguage
 }
 
 func localizedLanguageName(targetLanguage, viewerLanguage string) string {

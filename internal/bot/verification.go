@@ -32,7 +32,7 @@ func (b *Bot) HandleVerificationSuccess(chatID, userID int64) {
 		}
 	}
 
-	userLanguage := userLanguageFromPending(pending)
+	userLanguage := b.targetUserLanguage(chatID, userID)
 	text := tr(userLanguage, "verification_success", chatID)
 	successMsg, err := b.Bot.SendMessage(userID, text, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 	if err != nil {

@@ -21,6 +21,8 @@ type Bot struct {
 	Store     store.Store
 	Blacklist *blacklist.Blacklist
 	Captcha   *captcha.Server
+
+	cache botCache
 }
 
 func New(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs *captcha.Server) (*Bot, error) {
@@ -62,8 +64,10 @@ func (b *Bot) Start() error {
 	dispatcher.AddHandler(handlers.NewCommand("unreject", b.cmdUnreject))
 	dispatcher.AddHandler(handlers.NewCommand("resetverify", b.cmdResetAllVerify))
 	dispatcher.AddHandler(handlers.NewCommand("stats", b.cmdStats))
+	dispatcher.AddHandler(handlers.NewCommand("lang", b.cmdLang))
 	dispatcher.AddHandler(handlers.NewCommand("start", b.cmdStart))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix(moderationCallbackPrefix), b.handleModerationCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix(languagePreferenceCallbackPrefix), b.handleLanguagePreferenceCallback))
 
 	// Register message handler for group/supergroup messages (lower priority)
 	dispatcher.AddHandler(handlers.NewMessage(message.Supergroup, b.handleMessage))

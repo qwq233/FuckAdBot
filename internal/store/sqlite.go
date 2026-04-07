@@ -15,7 +15,7 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	dir := filepath.Dir(dbPath)
@@ -74,6 +74,11 @@ func (s *SQLiteStore) migrate() error {
 			added_at DATETIME NOT NULL DEFAULT (datetime('now')),
 			PRIMARY KEY (chat_id, word)
 		)`,
+		`CREATE TABLE IF NOT EXISTS user_preferences (
+			user_id INTEGER NOT NULL PRIMARY KEY,
+			preferred_language TEXT NOT NULL,
+			updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`,
 	}
 
 	for _, q := range queries {
@@ -112,6 +117,11 @@ func (s *SQLiteStore) migrateSchemaVersion() error {
 				return err
 			}
 			version = 2
+		case 2:
+			if err := s.migrateToVersion3(); err != nil {
+				return err
+			}
+			version = 3
 		default:
 			return fmt.Errorf("unsupported database schema version: %d", version)
 		}
@@ -143,6 +153,22 @@ func (s *SQLiteStore) migrateToVersion2() error {
 
 	if err := s.setSchemaVersion(2); err != nil {
 		return fmt.Errorf("set user_version to 2: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SQLiteStore) migrateToVersion3() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS user_preferences (
+		user_id INTEGER NOT NULL PRIMARY KEY,
+		preferred_language TEXT NOT NULL,
+		updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+	)`); err != nil {
+		return fmt.Errorf("migrate database schema from version 2 to 3: %w", err)
+	}
+
+	if err := s.setSchemaVersion(3); err != nil {
+		return fmt.Errorf("set user_version to 3: %w", err)
 	}
 
 	return nil
@@ -211,6 +237,41 @@ func (s *SQLiteStore) addPendingVerificationColumns(requiredColumns map[string]s
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// --- User preferences ---
+
+func (s *SQLiteStore) GetUserLanguagePreference(userID int64) (string, error) {
+	var language string
+	err := s.db.QueryRow(
+		`SELECT preferred_language FROM user_preferences WHERE user_id = ?`,
+		userID,
+	).Scan(&language)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+
+	return language, nil
+}
+
+func (s *SQLiteStore) SetUserLanguagePreference(userID int64, language string) error {
+	if strings.TrimSpace(language) == "" {
+		return fmt.Errorf("preferred language cannot be empty")
+	}
+
+	_, err := s.db.Exec(
+		`INSERT INTO user_preferences (user_id, preferred_language, updated_at)
+		 VALUES (?, ?, datetime('now'))
+		 ON CONFLICT(user_id) DO UPDATE SET
+		 	preferred_language = excluded.preferred_language,
+		 	updated_at = excluded.updated_at`,
+		userID,
+		language,
+	)
+	return err
 }
 
 // --- User status ---

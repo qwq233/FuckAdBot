@@ -99,7 +99,7 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(msg.From)
+	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
 	if isPrivate {
@@ -167,7 +167,7 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(msg.From)
+	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
 	if isPrivate {
@@ -245,7 +245,7 @@ func (b *Bot) cmdListBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(msg.From)
+	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	isPrivate := msg.Chat.Type == "private"
 	if isPrivate {
@@ -300,7 +300,7 @@ func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg == nil {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(msg.From)
+	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	if !b.canApproveFromMessage(bot, msg) {
 		return nil
@@ -346,7 +346,7 @@ func (b *Bot) cmdResetAllVerify(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg == nil || msg.From == nil || !b.isBotAdmin(msg.From.Id) {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(msg.From)
+	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	args := strings.Fields(msg.Text)
 	userID, err := extractTargetUserID(requestLanguage, msg, args[1:])
@@ -379,7 +379,7 @@ func (b *Bot) cmdReject(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(msg.From)
+	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
 		return nil
@@ -425,7 +425,7 @@ func (b *Bot) cmdUnreject(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(msg.From)
+	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
 		return nil
@@ -465,7 +465,7 @@ func (b *Bot) cmdStats(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if msg.From == nil {
 		return nil
 	}
-	requestLanguage := userLanguageFromUser(msg.From)
+	requestLanguage := b.requestLanguageForUser(msg.From)
 
 	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
 		return nil
@@ -487,6 +487,45 @@ func (b *Bot) cmdStats(bot *gotgbot.Bot, ctx *ext.Context) error {
 	return nil
 }
 
+func (b *Bot) sendLanguagePreferencePrompt(bot *gotgbot.Bot, chatID int64, viewerLanguage string, notice string) {
+	text := tr(viewerLanguage, "lang_prompt")
+	if notice != "" {
+		text = notice + "\n\n" + text
+	}
+
+	bot.SendMessage(chatID, text, &gotgbot.SendMessageOpts{
+		ReplyMarkup: BuildLanguagePreferenceKeyboard(viewerLanguage),
+	})
+}
+
+func (b *Bot) cmdLang(bot *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+	if msg == nil || msg.Chat.Type != "private" || msg.From == nil {
+		return nil
+	}
+
+	requestLanguage := b.requestLanguageForUser(msg.From)
+	args := strings.Fields(msg.Text)
+	if len(args) < 2 {
+		b.sendLanguagePreferencePrompt(bot, msg.Chat.Id, requestLanguage, "")
+		return nil
+	}
+
+	selectedLanguage, changed, err := b.applyUserLanguagePreference(msg.From.Id, args[1])
+	if err != nil {
+		log.Printf("[bot] store.SetUserLanguagePreference error: %v", err)
+		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "lang_update_failed"), nil)
+		return nil
+	}
+	if !changed {
+		b.sendLanguagePreferencePrompt(bot, msg.Chat.Id, requestLanguage, tr(requestLanguage, "lang_invalid"))
+		return nil
+	}
+
+	bot.SendMessage(msg.Chat.Id, tr(selectedLanguage, "lang_updated", localizedLanguageName(selectedLanguage, selectedLanguage)), nil)
+	return nil
+}
+
 func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
 	if msg == nil || msg.Chat.Type != "private" {
@@ -494,7 +533,7 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 	requestLanguage := defaultUserLanguage
 	if msg.From != nil {
-		requestLanguage = userLanguageFromUser(msg.From)
+		requestLanguage = b.requestLanguageForUser(msg.From)
 	}
 
 	args := ctx.Args()
@@ -510,7 +549,7 @@ func (b *Bot) cmdStart(bot *gotgbot.Bot, ctx *ext.Context) error {
 func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, payload string) error {
 	requestLanguage := defaultUserLanguage
 	if msg.From != nil {
-		requestLanguage = userLanguageFromUser(msg.From)
+		requestLanguage = b.requestLanguageForUser(msg.From)
 	}
 
 	chatID, userID, verificationInfoID, err := ParseVerificationStartPayload(payload)
@@ -534,10 +573,12 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_link_expired"), nil)
 		return nil
 	}
-	requestLanguage = userLanguageFromUser(msg.From)
+	requestLanguage = b.requestLanguageForUser(msg.From)
 
 	checkText := buildCheckText(msg.From)
-	if chat, err := bot.GetChat(userID, nil); err == nil && chat.Bio != "" {
+	if chat := b.cachedUserChat(userID, func(userID int64) (*gotgbot.ChatFullInfo, error) {
+		return bot.GetChat(userID, nil)
+	}); chat != nil && chat.Bio != "" {
 		checkText += " " + chat.Bio
 	}
 

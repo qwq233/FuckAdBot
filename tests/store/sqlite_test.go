@@ -183,8 +183,8 @@ func TestSQLiteStoreSetsSchemaVersionToCurrentForFreshDB(t *testing.T) {
 		t.Fatalf("read user_version error = %v", err)
 	}
 
-	if version != 2 {
-		t.Fatalf("user_version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("user_version = %d, want 3", version)
 	}
 }
 
@@ -259,8 +259,8 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToCurrent(t *testing.T) {
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("migrated user_version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("migrated user_version = %d, want 3", version)
 	}
 
 	rows, err := rawDB.Query(`PRAGMA table_info(pending_verifications)`)
@@ -384,8 +384,8 @@ func TestSQLiteStoreMigratesVersionOneDatabaseToVersionTwoWithoutDataLoss(t *tes
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("migrated user_version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("migrated user_version = %d, want 3", version)
 	}
 
 	var userLanguage string
@@ -408,6 +408,149 @@ func TestSQLiteStoreMigratesVersionOneDatabaseToVersionTwoWithoutDataLoss(t *tes
 	}
 	if pending.Timestamp != 1712300000 || pending.RandomToken != "abc123x" || pending.ReminderMessageID != 7001 || pending.PrivateMessageID != 8001 || pending.OriginalMessageID != 8101 || pending.MessageThreadID != 9001 || pending.ReplyToMessageID != 5001 {
 		t.Fatalf("GetPending() = %+v, preserved fields mismatch", *pending)
+	}
+}
+
+func TestSQLiteStoreMigratesVersionTwoDatabaseToVersionThree(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+
+	seedQueries := []string{
+		`CREATE TABLE user_status (
+			chat_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('verified','rejected')),
+			updated_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (chat_id, user_id)
+		)`,
+		`CREATE TABLE pending_verifications (
+			chat_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			user_language TEXT NOT NULL DEFAULT 'zh-cn',
+			token_timestamp INTEGER NOT NULL DEFAULT 0,
+			token_rand TEXT NOT NULL DEFAULT '',
+			expire_at DATETIME NOT NULL,
+			reminder_message_id INTEGER NOT NULL DEFAULT 0,
+			private_message_id INTEGER NOT NULL DEFAULT 0,
+			original_message_id INTEGER NOT NULL DEFAULT 0,
+			message_thread_id INTEGER NOT NULL DEFAULT 0,
+			reply_to_message_id INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (chat_id, user_id)
+		)`,
+		`CREATE TABLE warnings (
+			chat_id INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			count INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (chat_id, user_id)
+		)`,
+		`CREATE TABLE blacklist_words (
+			chat_id INTEGER NOT NULL DEFAULT 0,
+			word TEXT NOT NULL,
+			added_by TEXT NOT NULL DEFAULT '',
+			added_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (chat_id, word)
+		)`,
+		`PRAGMA user_version = 2`,
+	}
+
+	for _, query := range seedQueries {
+		if _, err := rawDB.Exec(query); err != nil {
+			t.Fatalf("seed schema error = %v", err)
+		}
+	}
+
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("rawDB.Close() error = %v", err)
+	}
+
+	store, err := storepkg.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	rawDB, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error after migration = %v", err)
+	}
+	defer rawDB.Close()
+
+	var version int
+	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read migrated user_version error = %v", err)
+	}
+	if version != 3 {
+		t.Fatalf("migrated user_version = %d, want 3", version)
+	}
+
+	rows, err := rawDB.Query(`PRAGMA table_info(user_preferences)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(user_preferences) error = %v", err)
+	}
+	defer rows.Close()
+
+	foundPreferredLanguage := false
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			dataType  string
+			notNull   int
+			defaultV  sql.NullString
+			primaryPK int
+		)
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultV, &primaryPK); err != nil {
+			t.Fatalf("scan user_preferences table_info row error = %v", err)
+		}
+		if name == "preferred_language" {
+			foundPreferredLanguage = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate user_preferences rows error = %v", err)
+	}
+	if !foundPreferredLanguage {
+		t.Fatal("user_preferences missing preferred_language column after migration")
+	}
+}
+
+func TestSQLiteStoreUserLanguagePreferenceRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetUserLanguagePreference(42, "en"); err != nil {
+		t.Fatalf("SetUserLanguagePreference() error = %v", err)
+	}
+
+	language, err := store.GetUserLanguagePreference(42)
+	if err != nil {
+		t.Fatalf("GetUserLanguagePreference() error = %v", err)
+	}
+	if language != "en" {
+		t.Fatalf("GetUserLanguagePreference() = %q, want %q", language, "en")
+	}
+
+	if err := store.SetUserLanguagePreference(42, "zh-cn"); err != nil {
+		t.Fatalf("SetUserLanguagePreference(update) error = %v", err)
+	}
+
+	language, err = store.GetUserLanguagePreference(42)
+	if err != nil {
+		t.Fatalf("GetUserLanguagePreference() after update error = %v", err)
+	}
+	if language != "zh-cn" {
+		t.Fatalf("GetUserLanguagePreference() after update = %q, want %q", language, "zh-cn")
 	}
 }
 
