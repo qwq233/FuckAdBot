@@ -27,8 +27,14 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	s := &SQLiteStore{db: db}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping sqlite: %w", err)
+	}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -192,6 +198,45 @@ func (s *SQLiteStore) setSchemaVersion(version int) error {
 	return err
 }
 
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanPending(scanner rowScanner) (*PendingVerification, error) {
+	var pending PendingVerification
+	var expireAt string
+	err := scanner.Scan(
+		&pending.ChatID,
+		&pending.UserID,
+		&pending.UserLanguage,
+		&pending.Timestamp,
+		&pending.RandomToken,
+		&expireAt,
+		&pending.ReminderMessageID,
+		&pending.PrivateMessageID,
+		&pending.OriginalMessageID,
+		&pending.MessageThreadID,
+		&pending.ReplyToMessageID,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if strings.TrimSpace(pending.UserLanguage) == "" {
+		pending.UserLanguage = "zh-cn"
+	}
+
+	pending.ExpireAt, err = parseSQLiteTime(expireAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse pending expire_at: %w", err)
+	}
+
+	return &pending, nil
+}
+
 func (s *SQLiteStore) addPendingVerificationColumns(requiredColumns map[string]string) error {
 	rows, err := s.db.Query(`PRAGMA table_info(pending_verifications)`)
 	if err != nil {
@@ -327,6 +372,33 @@ func (s *SQLiteStore) removeStatus(chatID, userID int64, status string) error {
 	return err
 }
 
+func (s *SQLiteStore) hasStatusTx(tx *sql.Tx, chatID, userID int64, status string) (bool, error) {
+	var count int
+	err := tx.QueryRow(
+		`SELECT COUNT(*) FROM user_status WHERE chat_id = ? AND user_id = ? AND status = ?`,
+		chatID, userID, status,
+	).Scan(&count)
+	return count > 0, err
+}
+
+func (s *SQLiteStore) setStatusTx(tx *sql.Tx, chatID, userID int64, status string) error {
+	_, err := tx.Exec(
+		`INSERT INTO user_status (chat_id, user_id, status, updated_at)
+		 VALUES (?, ?, ?, datetime('now'))
+		 ON CONFLICT(chat_id, user_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
+		chatID, userID, status,
+	)
+	return err
+}
+
+func (s *SQLiteStore) removeStatusTx(tx *sql.Tx, chatID, userID int64, status string) error {
+	_, err := tx.Exec(
+		`DELETE FROM user_status WHERE chat_id = ? AND user_id = ? AND status = ?`,
+		chatID, userID, status,
+	)
+	return err
+}
+
 // --- Pending verification ---
 
 func (s *SQLiteStore) HasActivePending(chatID, userID int64) (bool, error) {
@@ -339,42 +411,105 @@ func (s *SQLiteStore) HasActivePending(chatID, userID int64) (bool, error) {
 }
 
 func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, error) {
-	var pending PendingVerification
-	var expireAt string
-	err := s.db.QueryRow(
+	pending, err := scanPending(s.db.QueryRow(
 		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
 		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID,
-	).Scan(
-		&pending.ChatID,
-		&pending.UserID,
-		&pending.UserLanguage,
-		&pending.Timestamp,
-		&pending.RandomToken,
-		&expireAt,
-		&pending.ReminderMessageID,
-		&pending.PrivateMessageID,
-		&pending.OriginalMessageID,
-		&pending.MessageThreadID,
-		&pending.ReplyToMessageID,
-	)
+	))
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
 		return nil, err
 	}
+	return pending, nil
+}
 
+func (s *SQLiteStore) CreatePendingIfAbsent(pending PendingVerification) (bool, *PendingVerification, error) {
 	if strings.TrimSpace(pending.UserLanguage) == "" {
 		pending.UserLanguage = "zh-cn"
 	}
 
-	pending.ExpireAt, err = parseSQLiteTime(expireAt)
+	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("parse pending expire_at: %w", err)
+		return false, nil, err
+	}
+	defer tx.Rollback()
+
+	existing, err := scanPending(tx.QueryRow(
+		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
+		pending.ChatID, pending.UserID,
+	))
+	if err != nil {
+		return false, nil, err
+	}
+	if existing != nil {
+		if existing.ExpireAt.After(time.Now().UTC()) {
+			if err := tx.Commit(); err != nil {
+				return false, nil, err
+			}
+			return false, existing, nil
+		}
+
+		if err := tx.Commit(); err != nil {
+			return false, nil, err
+		}
+		return false, existing, nil
 	}
 
-	return &pending, nil
+	verified, err := s.hasStatusTx(tx, pending.ChatID, pending.UserID, "verified")
+	if err != nil {
+		return false, nil, err
+	}
+	if verified {
+		if err := tx.Commit(); err != nil {
+			return false, nil, err
+		}
+		return false, nil, nil
+	}
+
+	rejected, err := s.hasStatusTx(tx, pending.ChatID, pending.UserID, "rejected")
+	if err != nil {
+		return false, nil, err
+	}
+	if rejected {
+		if err := tx.Commit(); err != nil {
+			return false, nil, err
+		}
+		return false, nil, nil
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO pending_verifications (
+			chat_id,
+			user_id,
+			user_language,
+			token_timestamp,
+			token_rand,
+			expire_at,
+			reminder_message_id,
+			private_message_id,
+			original_message_id,
+			message_thread_id,
+			reply_to_message_id
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pending.ChatID,
+		pending.UserID,
+		pending.UserLanguage,
+		pending.Timestamp,
+		pending.RandomToken,
+		pending.ExpireAt.UTC().Format(time.DateTime),
+		pending.ReminderMessageID,
+		pending.PrivateMessageID,
+		pending.OriginalMessageID,
+		pending.MessageThreadID,
+		pending.ReplyToMessageID,
+	); err != nil {
+		return false, nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, nil, err
+	}
+	return true, nil, nil
 }
 
 func (s *SQLiteStore) SetPending(pending PendingVerification) error {
@@ -421,12 +556,154 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 	return err
 }
 
+func (s *SQLiteStore) UpdatePendingMetadataByToken(pending PendingVerification) (bool, error) {
+	if strings.TrimSpace(pending.UserLanguage) == "" {
+		pending.UserLanguage = "zh-cn"
+	}
+
+	result, err := s.db.Exec(
+		`UPDATE pending_verifications
+		 SET user_language = ?,
+		     expire_at = ?,
+		     reminder_message_id = ?,
+		     private_message_id = ?,
+		     original_message_id = ?,
+		     message_thread_id = ?,
+		     reply_to_message_id = ?
+		 WHERE chat_id = ?
+		   AND user_id = ?
+		   AND token_timestamp = ?
+		   AND token_rand = ?`,
+		pending.UserLanguage,
+		pending.ExpireAt.UTC().Format(time.DateTime),
+		pending.ReminderMessageID,
+		pending.PrivateMessageID,
+		pending.OriginalMessageID,
+		pending.MessageThreadID,
+		pending.ReplyToMessageID,
+		pending.ChatID,
+		pending.UserID,
+		pending.Timestamp,
+		pending.RandomToken,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+
+	return rowsAffected > 0, nil
+}
+
 func (s *SQLiteStore) ClearPending(chatID, userID int64) error {
 	_, err := s.db.Exec(
 		`DELETE FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID,
 	)
 	return err
+}
+
+func (s *SQLiteStore) ResolvePendingByToken(chatID, userID int64, timestamp int64, randomToken string, action PendingAction, maxWarnings int) (PendingResolutionResult, error) {
+	result := PendingResolutionResult{Action: action}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback()
+
+	pending, err := scanPending(tx.QueryRow(
+		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
+		chatID, userID,
+	))
+	if err != nil {
+		return result, err
+	}
+	if pending == nil {
+		if err := tx.Commit(); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	if pending.Timestamp != timestamp || pending.RandomToken != randomToken {
+		if err := tx.Commit(); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+
+	result.Matched = true
+	result.Pending = pending
+
+	if _, err := tx.Exec(
+		`DELETE FROM pending_verifications
+		 WHERE chat_id = ? AND user_id = ? AND token_timestamp = ? AND token_rand = ?`,
+		chatID, userID, timestamp, randomToken,
+	); err != nil {
+		return result, err
+	}
+
+	switch action {
+	case PendingActionApprove:
+		if err := s.setStatusTx(tx, chatID, userID, "verified"); err != nil {
+			return result, err
+		}
+		if err := s.removeStatusTx(tx, chatID, userID, "rejected"); err != nil {
+			return result, err
+		}
+		if err := s.resetWarningCountTx(tx, chatID, userID); err != nil {
+			return result, err
+		}
+		result.Verified = true
+	case PendingActionReject:
+		if err := s.setStatusTx(tx, chatID, userID, "rejected"); err != nil {
+			return result, err
+		}
+		if err := s.removeStatusTx(tx, chatID, userID, "verified"); err != nil {
+			return result, err
+		}
+		if err := s.resetWarningCountTx(tx, chatID, userID); err != nil {
+			return result, err
+		}
+		result.Rejected = true
+	case PendingActionExpire:
+		verified, err := s.hasStatusTx(tx, chatID, userID, "verified")
+		if err != nil {
+			return result, err
+		}
+		if verified {
+			result.Verified = true
+			break
+		}
+
+		rejected, err := s.hasStatusTx(tx, chatID, userID, "rejected")
+		if err != nil {
+			return result, err
+		}
+		if rejected {
+			result.Rejected = true
+			break
+		}
+
+		newCount, err := s.incrWarningCountTx(tx, chatID, userID)
+		if err != nil {
+			return result, err
+		}
+		result.WarningCount = newCount
+		result.ShouldBan = maxWarnings > 0 && newCount >= maxWarnings
+	case PendingActionCancel:
+	default:
+		return result, fmt.Errorf("unsupported pending action: %s", action)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (s *SQLiteStore) ClearUserVerificationStateEverywhere(userID int64) error {
@@ -474,8 +751,28 @@ func (s *SQLiteStore) IncrWarningCount(chatID, userID int64) (int, error) {
 	return count, err
 }
 
+func (s *SQLiteStore) incrWarningCountTx(tx *sql.Tx, chatID, userID int64) (int, error) {
+	var count int
+	err := tx.QueryRow(
+		`INSERT INTO warnings (chat_id, user_id, count, updated_at)
+		 VALUES (?, ?, 1, datetime('now'))
+		 ON CONFLICT(chat_id, user_id) DO UPDATE SET count = count + 1, updated_at = datetime('now')
+		 RETURNING count`,
+		chatID, userID,
+	).Scan(&count)
+	return count, err
+}
+
 func (s *SQLiteStore) ResetWarningCount(chatID, userID int64) error {
 	_, err := s.db.Exec(
+		`DELETE FROM warnings WHERE chat_id = ? AND user_id = ?`,
+		chatID, userID,
+	)
+	return err
+}
+
+func (s *SQLiteStore) resetWarningCountTx(tx *sql.Tx, chatID, userID int64) error {
+	_, err := tx.Exec(
 		`DELETE FROM warnings WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID,
 	)

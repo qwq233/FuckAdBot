@@ -178,8 +178,24 @@ func validateTurnstileConfig(cfg TurnstileConfig) error {
 		return nil
 	}
 
+	if strings.TrimSpace(cfg.SiteKey) == "" {
+		return fmt.Errorf("turnstile.site_key is required")
+	}
+
+	if strings.TrimSpace(cfg.SecretKey) == "" {
+		return fmt.Errorf("turnstile.secret_key is required")
+	}
+
 	if cfg.Domain == "" {
 		return fmt.Errorf("turnstile.domain is required")
+	}
+
+	if strings.TrimSpace(cfg.ListenAddr) == "" {
+		return fmt.Errorf("turnstile.listen_addr is required")
+	}
+
+	if cfg.ListenPort <= 0 || cfg.ListenPort > 65535 {
+		return fmt.Errorf("turnstile.listen_port must be between 1 and 65535")
 	}
 
 	if strings.Contains(cfg.Domain, "://") {

@@ -33,23 +33,14 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 
 	// --- Blacklist check (every message, including verified users) ---
-	checkText := buildCheckText(user)
-
-	// Best-effort bio fetch
-	if bioChat := b.cachedUserChat(user.Id, func(userID int64) (*gotgbot.ChatFullInfo, error) {
-		return bot.GetChat(userID, nil)
-	}); bioChat != nil && bioChat.Bio != "" {
-		checkText += " " + bioChat.Bio
-	}
-
-	if matched := b.Blacklist.MatchWithGroup(chatID, checkText); matched != "" {
+	if matched := b.matchUserAgainstBlacklist(bot, chatID, user); matched != "" {
 		// Don't ban group admins
 		if b.isGroupAdmin(bot, chatID, user.Id) {
 			return nil
 		}
 		log.Printf("[bot] blacklist hit: user=%d word=%q in chat=%d", user.Id, matched, chatID)
-		bot.DeleteMessage(chatID, msg.MessageId, nil)
-		bot.BanChatMember(chatID, user.Id, &gotgbot.BanChatMemberOpts{})
+		deleteMessageIfExists(bot, chatID, msg.MessageId, "blacklist hit")
+		banChatMember(bot, chatID, user.Id, "blacklist hit")
 		return nil
 	}
 
@@ -83,180 +74,219 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	// Check if there's an active pending verification window
-	hasPending, err := b.Store.HasActivePending(chatID, user.Id)
-	if err != nil {
-		log.Printf("[bot] store.HasActivePending error: %v", err)
-		return nil
-	}
-	if hasPending {
-		// Active window exists, silently delete without new reminder
-		deleteMessageIfExists(bot, chatID, msg.MessageId, "extra pending user message")
-		if err := b.deletePendingOriginalMessage(bot, chatID, user.Id, false); err != nil {
-			log.Printf("[bot] delete pending original message during active window error: %v", err)
-		}
-		return nil
-	}
-
-	// --- No active window: check warning count and send reminder ---
-	warnCount, err := b.Store.GetWarningCount(chatID, user.Id)
-	if err != nil {
-		log.Printf("[bot] store.GetWarningCount error: %v", err)
-		return nil
-	}
-
-	maxWarnings := b.Config.Moderation.MaxWarnings
-	if warnCount >= maxWarnings {
-		// Already exceeded max warnings, ban
-		log.Printf("[bot] banning user=%d in chat=%d: exceeded max warnings (%d)", user.Id, chatID, maxWarnings)
-		deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message before ban")
-		bot.BanChatMember(chatID, user.Id, &gotgbot.BanChatMemberOpts{})
-		return nil
-	}
-
-	timestamp := time.Now().UTC().Unix()
-	randomToken, err := newVerificationRandomToken(7)
-	if err != nil {
-		log.Printf("[bot] generate verification random token error: %v", err)
-		return nil
-	}
-
-	// Build reminder message with hidden username
-	maskedName := maskName(user.FirstName, userLanguage)
-	reminderText := appendDetectedLanguageLine(
-		tr(userLanguage, "reminder_text", user.Id, maskedName, warnCount+1, maxWarnings),
-		userLanguage,
-		userLanguage,
-	)
-
-	// Send reminder in the same comment thread
-	sendOpts := &gotgbot.SendMessageOpts{
-		ParseMode: "HTML",
-		ReplyParameters: &gotgbot.ReplyParameters{
-			MessageId:                msg.MessageId,
-			AllowSendingWithoutReply: true,
-		},
-	}
-	if msg.MessageThreadId != 0 {
-		sendOpts.MessageThreadId = msg.MessageThreadId
-	}
-
-	reminderMsg, err := bot.SendMessage(chatID, reminderText, sendOpts)
-	if err != nil {
-		log.Printf("[bot] send reminder error: %v", err)
-		deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after reminder failure")
-		return nil
-	}
-
-	// Record pending verification window
 	verifyWindow := b.Config.Moderation.GetVerifyWindow()
-	expireAt := time.Unix(timestamp, 0).UTC().Add(verifyWindow)
-	if err := b.Store.SetPending(store.PendingVerification{
-		ChatID:            chatID,
-		UserID:            user.Id,
-		UserLanguage:      userLanguage,
-		Timestamp:         timestamp,
-		RandomToken:       randomToken,
-		ExpireAt:          expireAt,
-		ReminderMessageID: reminderMsg.MessageId,
-		OriginalMessageID: msg.MessageId,
-		MessageThreadID:   msg.MessageThreadId,
-		ReplyToMessageID:  msg.MessageId,
-	}); err != nil {
-		log.Printf("[bot] store.SetPending error: %v", err)
-		deleteMessageIfExists(bot, chatID, reminderMsg.MessageId, "verification reminder after pending persist failure")
-		deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after pending persist failure")
+	maxWarnings := b.Config.Moderation.MaxWarnings
+
+	for attempt := 0; attempt < 3; attempt++ {
+		warnCount, err := b.Store.GetWarningCount(chatID, user.Id)
+		if err != nil {
+			log.Printf("[bot] store.GetWarningCount error: %v", err)
+			return nil
+		}
+
+		if warnCount >= maxWarnings {
+			log.Printf("[bot] banning user=%d in chat=%d: exceeded max warnings (%d)", user.Id, chatID, maxWarnings)
+			deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message before ban")
+			banChatMember(bot, chatID, user.Id, "warning limit exceeded")
+			return nil
+		}
+
+		timestamp := time.Now().UTC().Unix()
+		randomToken, err := newVerificationRandomToken(7)
+		if err != nil {
+			log.Printf("[bot] generate verification random token error: %v", err)
+			return nil
+		}
+
+		pending := store.PendingVerification{
+			ChatID:            chatID,
+			UserID:            user.Id,
+			UserLanguage:      userLanguage,
+			Timestamp:         timestamp,
+			RandomToken:       randomToken,
+			ExpireAt:          time.Unix(timestamp, 0).UTC().Add(verifyWindow),
+			OriginalMessageID: msg.MessageId,
+			MessageThreadID:   msg.MessageThreadId,
+			ReplyToMessageID:  msg.MessageId,
+		}
+
+		created, existing, err := b.Store.CreatePendingIfAbsent(pending)
+		if err != nil {
+			log.Printf("[bot] store.CreatePendingIfAbsent error: %v", err)
+			return nil
+		}
+		if !created {
+			if existing == nil {
+				verified, err := b.Store.IsVerified(chatID, user.Id)
+				if err == nil && verified {
+					return nil
+				}
+
+				rejected, err := b.Store.IsRejected(chatID, user.Id)
+				if err == nil && rejected {
+					deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message after pending race")
+					return nil
+				}
+				continue
+			}
+
+			if existing.ExpireAt.After(time.Now().UTC()) {
+				deleteMessageIfExists(bot, chatID, msg.MessageId, "extra pending user message")
+				if err := b.deletePendingOriginalMessage(bot, existing, false); err != nil {
+					log.Printf("[bot] delete pending original message during active window error: %v", err)
+				}
+				return nil
+			}
+
+			expired, err := b.Store.ResolvePendingByToken(existing.ChatID, existing.UserID, existing.Timestamp, existing.RandomToken, store.PendingActionExpire, maxWarnings)
+			if err != nil {
+				log.Printf("[bot] resolve expired pending during message handling error: %v", err)
+				return nil
+			}
+			if !expired.Matched {
+				continue
+			}
+			if expired.Pending != nil {
+				if err := b.deletePendingOriginalMessage(bot, expired.Pending, true); err != nil {
+					log.Printf("[bot] delete pending original message after stale expiry error: %v", err)
+				}
+			}
+			if expired.ShouldBan {
+				log.Printf("[bot] auto-banning user=%d in chat=%d: %d warnings", user.Id, chatID, expired.WarningCount)
+				deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after stale expiry")
+				banChatMember(bot, chatID, user.Id, "expired pending")
+				return nil
+			}
+			if expired.Verified {
+				return nil
+			}
+			if expired.Rejected {
+				deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message after stale expiry")
+				return nil
+			}
+			continue
+		}
+
+		maskedName := maskName(user.FirstName, userLanguage)
+		reminderText := appendDetectedLanguageLine(
+			tr(userLanguage, "reminder_text", user.Id, maskedName, warnCount+1, maxWarnings),
+			userLanguage,
+			userLanguage,
+		)
+
+		sendOpts := &gotgbot.SendMessageOpts{
+			ParseMode: "HTML",
+			ReplyParameters: &gotgbot.ReplyParameters{
+				MessageId:                msg.MessageId,
+				AllowSendingWithoutReply: true,
+			},
+		}
+		if msg.MessageThreadId != 0 {
+			sendOpts.MessageThreadId = msg.MessageThreadId
+		}
+
+		reminderMsg, err := sendMessageWithLog(bot, chatID, reminderText, sendOpts, "verification reminder")
+		if err != nil {
+			if _, resolveErr := b.Store.ResolvePendingByToken(chatID, user.Id, pending.Timestamp, pending.RandomToken, store.PendingActionCancel, maxWarnings); resolveErr != nil {
+				log.Printf("[bot] cancel pending after reminder send failure error: %v", resolveErr)
+			}
+			deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after reminder failure")
+			return nil
+		}
+
+		pending.ReminderMessageID = reminderMsg.MessageId
+		updated, err := b.Store.UpdatePendingMetadataByToken(pending)
+		if err != nil {
+			log.Printf("[bot] store.UpdatePendingMetadataByToken error: %v", err)
+			deleteMessageIfExists(bot, chatID, reminderMsg.MessageId, "verification reminder after pending update failure")
+			if _, resolveErr := b.Store.ResolvePendingByToken(chatID, user.Id, pending.Timestamp, pending.RandomToken, store.PendingActionCancel, maxWarnings); resolveErr != nil {
+				log.Printf("[bot] cancel pending after metadata update failure error: %v", resolveErr)
+			}
+			return nil
+		}
+		if !updated {
+			deleteMessageIfExists(bot, chatID, reminderMsg.MessageId, "verification reminder after pending race")
+			return nil
+		}
+
+		verificationStartURL := BuildVerificationStartURL(bot.Username, chatID, user.Id, reminderMsg.MessageId)
+		editReplyMarkupWithLog(bot, reminderMsg, &gotgbot.EditMessageReplyMarkupOpts{
+			ReplyMarkup: BuildReminderKeyboard(verificationStartURL, chatID, user.Id, userLanguage),
+		}, "verification reminder")
+
+		reminderTTL := b.Config.Moderation.GetReminderTTL()
+		scheduleMessageDeletion(bot, chatID, reminderMsg.MessageId, reminderTTL, "verification reminder")
+		b.scheduleOriginalMessageDeletion(bot, pending)
+		b.scheduleUserTimer(chatID, user.Id, verifyWindow, func() {
+			b.onVerifyWindowExpired(bot, pending)
+		})
 		return nil
 	}
 
-	verificationStartURL := BuildVerificationStartURL(bot.Username, chatID, user.Id, reminderMsg.MessageId)
-	if _, _, err := reminderMsg.EditReplyMarkup(bot, &gotgbot.EditMessageReplyMarkupOpts{
-		ReplyMarkup: BuildReminderKeyboard(verificationStartURL, chatID, user.Id, userLanguage),
-	}); err != nil {
-		log.Printf("[bot] edit reminder message reply markup error: %v", err)
-	}
-
-	// Keep the reminder visible for the full verification window unless configured longer.
-	reminderTTL := b.Config.Moderation.GetReminderTTL()
-	scheduleMessageDeletion(bot, chatID, reminderMsg.MessageId, reminderTTL, "verification reminder")
-	b.scheduleOriginalMessageDeletion(bot, chatID, user.Id)
-
-	// Schedule verification window expiry check
-	capturedUserID := user.Id
-	capturedChatID := chatID
-	t := time.AfterFunc(verifyWindow, func() {
-		b.onVerifyWindowExpired(bot, capturedChatID, capturedUserID)
-	})
-	b.trackUserTimer(capturedChatID, capturedUserID, t)
-
+	log.Printf("[bot] failed to reserve verification window after retries: chat=%d user=%d", chatID, user.Id)
 	return nil
 }
 
 // onVerifyWindowExpired is called when the verification window expires.
-func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, chatID, userID int64) {
-	if err := b.deletePendingOriginalMessage(bot, chatID, userID, true); err != nil {
-		log.Printf("[bot] delete pending original message on expiry error: %v", err)
-	}
-
-	// Clear the pending record
-	if err := b.Store.ClearPending(chatID, userID); err != nil {
-		log.Printf("[bot] store.ClearPending error in expiry: %v", err)
-	}
-
-	// Check if user verified during the window
-	verified, err := b.Store.IsVerified(chatID, userID)
+func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, pending store.PendingVerification) {
+	result, err := b.Store.ResolvePendingByToken(
+		pending.ChatID,
+		pending.UserID,
+		pending.Timestamp,
+		pending.RandomToken,
+		store.PendingActionExpire,
+		b.Config.Moderation.MaxWarnings,
+	)
 	if err != nil {
-		log.Printf("[bot] store.IsVerified error in expiry: %v", err)
+		log.Printf("[bot] resolve pending expiry error: %v", err)
 		return
 	}
-	if verified {
-		return // User verified in time
+	if !result.Matched {
+		return
 	}
 
-	// Increment warning count
-	newCount, err := b.Store.IncrWarningCount(chatID, userID)
-	if err != nil {
-		log.Printf("[bot] store.IncrWarningCount error: %v", err)
+	if result.Pending != nil {
+		if err := b.deletePendingOriginalMessage(bot, result.Pending, true); err != nil {
+			log.Printf("[bot] delete pending original message on expiry error: %v", err)
+		}
+	}
+
+	if result.Verified || result.Rejected {
 		return
 	}
 
 	log.Printf("[bot] verify window expired: user=%d chat=%d warnings=%d/%d",
-		userID, chatID, newCount, b.Config.Moderation.MaxWarnings)
+		pending.UserID, pending.ChatID, result.WarningCount, b.Config.Moderation.MaxWarnings)
 
-	if newCount >= b.Config.Moderation.MaxWarnings {
-		log.Printf("[bot] auto-banning user=%d in chat=%d: %d warnings", userID, chatID, newCount)
-		bot.BanChatMember(chatID, userID, &gotgbot.BanChatMemberOpts{})
+	if result.ShouldBan {
+		log.Printf("[bot] auto-banning user=%d in chat=%d: %d warnings", pending.UserID, pending.ChatID, result.WarningCount)
+		banChatMember(bot, pending.ChatID, pending.UserID, "expired verification window")
 	}
 }
 
-func (b *Bot) scheduleOriginalMessageDeletion(bot *gotgbot.Bot, chatID, userID int64) {
+func (b *Bot) scheduleOriginalMessageDeletion(bot *gotgbot.Bot, pending store.PendingVerification) {
 	originalMessageTTL := b.Config.Moderation.GetOriginalMessageTTL()
 	if originalMessageTTL <= 0 {
 		return
 	}
 
-	t := time.AfterFunc(originalMessageTTL, func() {
-		if err := b.deletePendingOriginalMessage(bot, chatID, userID, false); err != nil {
+	b.scheduleUserTimer(pending.ChatID, pending.UserID, originalMessageTTL, func() {
+		if err := b.deletePendingOriginalMessage(bot, &pending, false); err != nil {
 			log.Printf("[bot] delete pending original message after ttl error: %v", err)
 		}
 	})
-	b.trackUserTimer(chatID, userID, t)
 }
 
-func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, chatID, userID int64, force bool) error {
-	verified, err := b.Store.IsVerified(chatID, userID)
+func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, pending *store.PendingVerification, force bool) error {
+	if pending == nil || pending.OriginalMessageID == 0 {
+		return nil
+	}
+
+	verified, err := b.Store.IsVerified(pending.ChatID, pending.UserID)
 	if err != nil {
 		return fmt.Errorf("check verified status before deleting original message: %w", err)
 	}
 	if verified {
-		return nil
-	}
-
-	pending, err := b.Store.GetPending(chatID, userID)
-	if err != nil {
-		return fmt.Errorf("load pending verification before deleting original message: %w", err)
-	}
-	if pending == nil || pending.OriginalMessageID == 0 {
 		return nil
 	}
 
@@ -267,10 +297,14 @@ func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, chatID, userID int6
 		}
 	}
 
-	deleteMessageIfExists(bot, chatID, pending.OriginalMessageID, "pending original")
+	deleteMessageIfExists(bot, pending.ChatID, pending.OriginalMessageID, "pending original")
 	pending.OriginalMessageID = 0
-	if err := b.Store.SetPending(*pending); err != nil {
+	updated, err := b.Store.UpdatePendingMetadataByToken(*pending)
+	if err != nil {
 		return fmt.Errorf("persist original message deletion state: %w", err)
+	}
+	if !updated {
+		return nil
 	}
 
 	return nil
@@ -286,6 +320,21 @@ func buildCheckText(user *gotgbot.User) string {
 		text += " " + user.Username
 	}
 	return text
+}
+
+func (b *Bot) matchUserAgainstBlacklist(bot *gotgbot.Bot, chatID int64, user *gotgbot.User) string {
+	checkText := buildCheckText(user)
+	if matched := b.Blacklist.MatchWithGroup(chatID, checkText); matched != "" {
+		return matched
+	}
+
+	if bioChat := b.cachedUserChat(user.Id, func(userID int64) (*gotgbot.ChatFullInfo, error) {
+		return bot.GetChat(userID, nil)
+	}); bioChat != nil && bioChat.Bio != "" {
+		return b.Blacklist.MatchWithGroup(chatID, checkText+" "+bioChat.Bio)
+	}
+
+	return ""
 }
 
 func newVerificationRandomToken(length int) (string, error) {

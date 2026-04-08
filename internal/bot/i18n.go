@@ -148,12 +148,14 @@ func localizedLanguageName(targetLanguage, viewerLanguage string) string {
 	return tr(viewerLanguage, languageNameKey(targetLanguage))
 }
 
-func formatDetectedLanguageLine(targetLanguage, viewerLanguage string) string {
-	return tr(viewerLanguage, "detected_language_line", localizedLanguageName(targetLanguage, viewerLanguage))
+func formatDetectedLanguageLine(_, _ string) string {
+	return ""
 }
 
-func appendDetectedLanguageLine(text, targetLanguage, viewerLanguage string) string {
-	return text + "\n" + formatDetectedLanguageLine(targetLanguage, viewerLanguage)
+func appendDetectedLanguageLine(text, _, _ string) string {
+	// Keep this helper as a no-op so existing call sites stop appending
+	// "Language: XXX" / "语言: XXX" while remaining source-compatible.
+	return text
 }
 
 func tr(locale, key string, args ...any) string {

@@ -160,15 +160,12 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 	}
 
 	if cq.Message != nil {
-		_, _, err = cq.Message.EditText(bot, messageText, &gotgbot.EditMessageTextOpts{
+		if editTextWithLog(bot, cq.Message, messageText, &gotgbot.EditMessageTextOpts{
 			ParseMode: "HTML",
 			ReplyMarkup: gotgbot.InlineKeyboardMarkup{
 				InlineKeyboard: [][]gotgbot.InlineKeyboardButton{},
 			},
-		})
-		if err != nil {
-			log.Printf("[bot] edit reminder message after callback error: %v", err)
-		} else {
+		}, "manual moderation result") {
 			scheduleMessageDeletion(bot, cq.Message.GetChat().Id, cq.Message.GetMessageId(), manualModerationResultTTL, "manual moderation result")
 		}
 	}
@@ -220,12 +217,9 @@ func (b *Bot) handleLanguagePreferenceCallback(bot *gotgbot.Bot, ctx *ext.Contex
 
 	updatedText := tr(selectedLanguage, "lang_updated", localizedLanguageName(selectedLanguage, selectedLanguage))
 	if cq.Message != nil {
-		_, _, err = cq.Message.EditText(bot, updatedText, &gotgbot.EditMessageTextOpts{
+		editTextWithLog(bot, cq.Message, updatedText, &gotgbot.EditMessageTextOpts{
 			ReplyMarkup: gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{}},
-		})
-		if err != nil {
-			log.Printf("[bot] edit language preference message error: %v", err)
-		}
+		}, "language preference")
 	}
 
 	_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: tr(selectedLanguage, "lang_callback_updated")})

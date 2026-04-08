@@ -1,12 +1,16 @@
 package captcha
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -46,9 +50,9 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify Turnstile token with Cloudflare
-	ok, err := s.verifyTurnstile(cfToken, extractClientIP(r))
+	ok, err := s.verifyTurnstile(r.Context(), cfToken, extractClientIP(r))
 	if err != nil {
-		log.Printf("[captcha] turnstile verify error: %v", err)
+		logTurnstileVerifyError(err)
 		writeJSON(w, false, "验证服务异常，请稍后重试")
 		return
 	}
@@ -58,7 +62,12 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.onVerify != nil {
-		s.onVerify(chatID, userID)
+		s.onVerify(VerifiedToken{
+			ChatID:      chatID,
+			UserID:      userID,
+			Timestamp:   mustParseTimestamp(timestamp),
+			RandomToken: randomToken,
+		})
 	}
 
 	writeJSON(w, true, "验证成功")
@@ -103,16 +112,32 @@ func extractClientIP(r *http.Request) string {
 	return strings.TrimSpace(r.RemoteAddr)
 }
 
-func (s *Server) verifyTurnstile(token, remoteIP string) (bool, error) {
-	resp, err := http.PostForm("https://challenges.cloudflare.com/turnstile/v0/siteverify", url.Values{
+func (s *Server) verifyTurnstile(ctx context.Context, token, remoteIP string) (bool, error) {
+	form := url.Values{
 		"secret":   {s.cfg.SecretKey},
 		"response": {token},
 		"remoteip": {remoteIP},
-	})
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://challenges.cloudflare.com/turnstile/v0/siteverify", strings.NewReader(form.Encode()))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: turnstileVerifyRequestTimeout}
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return false, fmt.Errorf("turnstile siteverify returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	var result turnstileResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -131,6 +156,27 @@ func (s *Server) verifyTurnstile(token, remoteIP string) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func mustParseTimestamp(value string) int64 {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func logTurnstileVerifyError(err error) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		log.Printf("[captcha] turnstile verify timeout: %v", err)
+	case strings.Contains(strings.ToLower(err.Error()), "status 4"):
+		log.Printf("[captcha] turnstile verify upstream rejected request: %v", err)
+	case strings.Contains(strings.ToLower(err.Error()), "status 5"):
+		log.Printf("[captcha] turnstile verify upstream error: %v", err)
+	default:
+		log.Printf("[captcha] turnstile verify transport error: %v", err)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, success bool, message string) {

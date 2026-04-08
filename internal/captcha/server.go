@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -27,11 +28,21 @@ type Server struct {
 	verifyWindow time.Duration
 	botToken     string
 	tmpl         *template.Template
-	onVerify     func(chatID, userID int64) // callback when user passes verification
+	onVerify     func(token VerifiedToken) // callback when user passes verification
 	httpServer   *http.Server
+	httpClient   *http.Client
 }
 
-func NewServer(cfg *config.TurnstileConfig, st store.Store, verifyWindow time.Duration, botToken string, onVerify func(chatID, userID int64)) *Server {
+type VerifiedToken struct {
+	ChatID      int64
+	UserID      int64
+	Timestamp   int64
+	RandomToken string
+}
+
+const turnstileVerifyRequestTimeout = 10 * time.Second
+
+func NewServer(cfg *config.TurnstileConfig, st store.Store, verifyWindow time.Duration, botToken string, onVerify func(token VerifiedToken)) *Server {
 	tmpl := template.Must(template.ParseFS(verifyHTML, "verify.html"))
 	return &Server{
 		cfg:          cfg,
@@ -40,20 +51,35 @@ func NewServer(cfg *config.TurnstileConfig, st store.Store, verifyWindow time.Du
 		botToken:     botToken,
 		tmpl:         tmpl,
 		onVerify:     onVerify,
+		httpClient: &http.Client{
+			Timeout: turnstileVerifyRequestTimeout,
+		},
 	}
 }
 
 func (s *Server) Start() error {
+	if s.httpServer != nil {
+		return fmt.Errorf("captcha server already started")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(config.VerifyPath, s.handleVerifyPage)
 	mux.HandleFunc(config.CallbackPath, s.handleCallback)
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.ListenAddr, s.cfg.ListenPort)
-	s.httpServer = &http.Server{Addr: addr, Handler: mux}
-	log.Printf("[captcha] HTTP server listening on %s", addr)
-	if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
 		return err
 	}
+
+	s.httpServer = &http.Server{Addr: addr, Handler: mux}
+	log.Printf("[captcha] HTTP server listening on %s", listener.Addr().String())
+	go func() {
+		if err := s.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("[captcha] HTTP server stopped unexpectedly: %v", err)
+		}
+	}()
+
 	return nil
 }
 

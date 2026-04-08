@@ -40,10 +40,19 @@ func (s *countingPreferenceStore) HasActivePending(chatID, userID int64) (bool, 
 func (s *countingPreferenceStore) GetPending(chatID, userID int64) (*storepkg.PendingVerification, error) {
 	return nil, nil
 }
+func (s *countingPreferenceStore) CreatePendingIfAbsent(pending storepkg.PendingVerification) (bool, *storepkg.PendingVerification, error) {
+	return true, nil, nil
+}
 func (s *countingPreferenceStore) SetPending(pending storepkg.PendingVerification) error {
 	return nil
 }
+func (s *countingPreferenceStore) UpdatePendingMetadataByToken(pending storepkg.PendingVerification) (bool, error) {
+	return true, nil
+}
 func (s *countingPreferenceStore) ClearPending(chatID, userID int64) error { return nil }
+func (s *countingPreferenceStore) ResolvePendingByToken(chatID, userID int64, timestamp int64, randomToken string, action storepkg.PendingAction, maxWarnings int) (storepkg.PendingResolutionResult, error) {
+	return storepkg.PendingResolutionResult{}, nil
+}
 func (s *countingPreferenceStore) ClearUserVerificationStateEverywhere(userID int64) error {
 	return nil
 }

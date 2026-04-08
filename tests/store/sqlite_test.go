@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -709,5 +710,252 @@ func TestIncrWarningCountConcurrent(t *testing.T) {
 	}
 	if count != goroutines {
 		t.Fatalf("GetWarningCount() = %d, want %d (concurrent increment mismatch)", count, goroutines)
+	}
+}
+
+func TestCreatePendingIfAbsentReturnsExistingActivePending(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	original := storepkg.PendingVerification{
+		ChatID:            -100123,
+		UserID:            42,
+		UserLanguage:      "en",
+		Timestamp:         time.Now().UTC().Unix(),
+		RandomToken:       "token-a",
+		ExpireAt:          time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+		OriginalMessageID: 7001,
+	}
+	if err := store.SetPending(original); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	created, existing, err := store.CreatePendingIfAbsent(storepkg.PendingVerification{
+		ChatID:       original.ChatID,
+		UserID:       original.UserID,
+		UserLanguage: "zh-cn",
+		Timestamp:    original.Timestamp + 1,
+		RandomToken:  "token-b",
+		ExpireAt:     original.ExpireAt.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreatePendingIfAbsent() error = %v", err)
+	}
+	if created {
+		t.Fatal("CreatePendingIfAbsent() created = true, want false for active pending")
+	}
+	if existing == nil {
+		t.Fatal("CreatePendingIfAbsent() existing = nil, want active pending snapshot")
+	}
+	if existing.RandomToken != original.RandomToken {
+		t.Fatalf("existing.RandomToken = %q, want %q", existing.RandomToken, original.RandomToken)
+	}
+}
+
+func TestResolvePendingByTokenApproveSetsVerifiedAndClearsPending(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	pending := storepkg.PendingVerification{
+		ChatID:            -100123,
+		UserID:            42,
+		UserLanguage:      "en",
+		Timestamp:         time.Now().UTC().Unix(),
+		RandomToken:       "token-a",
+		ExpireAt:          time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+		ReminderMessageID: 7001,
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+	if _, err := store.IncrWarningCount(pending.ChatID, pending.UserID); err != nil {
+		t.Fatalf("IncrWarningCount() error = %v", err)
+	}
+
+	result, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionApprove, 3)
+	if err != nil {
+		t.Fatalf("ResolvePendingByToken() error = %v", err)
+	}
+	if !result.Matched || !result.Verified {
+		t.Fatalf("ResolvePendingByToken() = %+v, want matched verified result", result)
+	}
+
+	gotPending, err := store.GetPending(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if gotPending != nil {
+		t.Fatalf("GetPending() = %+v, want nil after approve", *gotPending)
+	}
+
+	verified, err := store.IsVerified(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("IsVerified() error = %v", err)
+	}
+	if !verified {
+		t.Fatal("IsVerified() = false, want true after approve")
+	}
+
+	warnings, err := store.GetWarningCount(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetWarningCount() error = %v", err)
+	}
+	if warnings != 0 {
+		t.Fatalf("GetWarningCount() = %d, want 0 after approve", warnings)
+	}
+}
+
+func TestResolvePendingByTokenExpireIncrementsWarningOnce(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(-time.Minute).Truncate(time.Second),
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	first, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionExpire, 3)
+	if err != nil {
+		t.Fatalf("ResolvePendingByToken() first error = %v", err)
+	}
+	if !first.Matched || first.WarningCount != 1 {
+		t.Fatalf("first ResolvePendingByToken() = %+v, want warning count 1", first)
+	}
+
+	second, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionExpire, 3)
+	if err != nil {
+		t.Fatalf("ResolvePendingByToken() second error = %v", err)
+	}
+	if second.Matched {
+		t.Fatalf("second ResolvePendingByToken() = %+v, want unmatched no-op", second)
+	}
+
+	warnings, err := store.GetWarningCount(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetWarningCount() error = %v", err)
+	}
+	if warnings != 1 {
+		t.Fatalf("GetWarningCount() = %d, want 1 after repeated expiry resolution", warnings)
+	}
+}
+
+func TestResolvePendingByTokenConcurrentOnlyOneMutationWins(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(-time.Minute).Truncate(time.Second),
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	results := make(chan storepkg.PendingResolutionResult, 2)
+	errs := make(chan error, 2)
+
+	go func() {
+		result, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionExpire, 3)
+		results <- result
+		errs <- err
+	}()
+	go func() {
+		result, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionApprove, 3)
+		results <- result
+		errs <- err
+	}()
+
+	matchedCount := 0
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("ResolvePendingByToken() concurrent error = %v", err)
+		}
+		if result := <-results; result.Matched {
+			matchedCount++
+		}
+	}
+
+	if matchedCount != 1 {
+		t.Fatalf("matched resolution count = %d, want 1", matchedCount)
+	}
+}
+
+func TestCreatePendingIfAbsentConcurrentOnlyOneCreateWins(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	base := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}
+
+	type createResult struct {
+		created bool
+		err     error
+	}
+
+	results := make(chan createResult, 2)
+	for i := 0; i < 2; i++ {
+		i := i
+		go func() {
+			pending := base
+			pending.Timestamp = time.Now().UTC().Unix() + int64(i)
+			pending.RandomToken = fmt.Sprintf("token-%d", i)
+			created, _, err := store.CreatePendingIfAbsent(pending)
+			results <- createResult{created: created, err: err}
+		}()
+	}
+
+	createdCount := 0
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("CreatePendingIfAbsent() error = %v", result.err)
+		}
+		if result.created {
+			createdCount++
+		}
+	}
+
+	if createdCount != 1 {
+		t.Fatalf("created pending count = %d, want 1", createdCount)
 	}
 }

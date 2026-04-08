@@ -20,6 +20,8 @@ import (
 
 type timerKey struct{ chatID, userID int64 }
 
+const dispatcherMaxRoutines = 16
+
 type Bot struct {
 	Bot       *gotgbot.Bot
 	Config    *config.Config
@@ -58,6 +60,32 @@ func (b *Bot) trackUserTimer(chatID, userID int64, t *time.Timer) {
 	b.timers[key] = append(b.timers[key], t)
 }
 
+func (b *Bot) removeTrackedTimer(chatID, userID int64, target *time.Timer) {
+	b.timersMu.Lock()
+	defer b.timersMu.Unlock()
+
+	key := timerKey{chatID, userID}
+	timers := b.timers[key]
+	if len(timers) == 0 {
+		return
+	}
+
+	filtered := timers[:0]
+	for _, timer := range timers {
+		if timer == target {
+			continue
+		}
+		filtered = append(filtered, timer)
+	}
+
+	if len(filtered) == 0 {
+		delete(b.timers, key)
+		return
+	}
+
+	b.timers[key] = filtered
+}
+
 // cancelUserTimers stops all pending timers for a (chatID, userID) pair.
 func (b *Bot) cancelUserTimers(chatID, userID int64) {
 	b.timersMu.Lock()
@@ -69,12 +97,25 @@ func (b *Bot) cancelUserTimers(chatID, userID int64) {
 	delete(b.timers, key)
 }
 
+func (b *Bot) scheduleUserTimer(chatID, userID int64, delay time.Duration, fn func()) *time.Timer {
+	trackedTimer := make(chan *time.Timer, 1)
+	timer := time.AfterFunc(delay, func() {
+		timer := <-trackedTimer
+		defer b.removeTrackedTimer(chatID, userID, timer)
+		fn()
+	})
+	b.trackUserTimer(chatID, userID, timer)
+	trackedTimer <- timer
+	return timer
+}
+
 func (b *Bot) Start(ctx context.Context) error {
 	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
 		Error: func(_ *gotgbot.Bot, _ *ext.Context, err error) ext.DispatcherAction {
 			log.Printf("[bot] handler error: %v", err)
 			return ext.DispatcherActionNoop
 		},
+		MaxRoutines: dispatcherMaxRoutines,
 	})
 
 	updaterErrors := newUpdaterErrorThrottler()

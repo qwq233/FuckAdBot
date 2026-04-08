@@ -4,41 +4,47 @@ import (
 	"log"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
+	"github.com/qwq233/fuckadbot/internal/captcha"
+	"github.com/qwq233/fuckadbot/internal/store"
 )
 
-func (b *Bot) HandleVerificationSuccess(chatID, userID int64) {
-	pending, err := b.Store.GetPending(chatID, userID)
+func (b *Bot) HandleVerificationSuccess(token captcha.VerifiedToken) {
+	result, err := b.Store.ResolvePendingByToken(
+		token.ChatID,
+		token.UserID,
+		token.Timestamp,
+		token.RandomToken,
+		store.PendingActionApprove,
+		b.Config.Moderation.MaxWarnings,
+	)
 	if err != nil {
-		log.Printf("[bot] store.GetPending error during verification success: %v", err)
+		log.Printf("[bot] resolve verification success error: %v", err)
+		return
 	}
-
-	if err := b.approveUser(chatID, userID); err != nil {
-		log.Printf("[bot] approveUser error during verification success: %v", err)
+	if !result.Matched {
 		return
 	}
 
+	b.cancelUserTimers(token.ChatID, token.UserID)
+
+	pending := result.Pending
 	if pending == nil {
 		return
 	}
 
 	if pending.ReminderMessageID != 0 {
-		if _, err := b.Bot.DeleteMessage(chatID, pending.ReminderMessageID, nil); err != nil {
-			log.Printf("[bot] delete reminder message after verification error: %v", err)
-		}
+		deleteMessageIfExists(b.Bot, token.ChatID, pending.ReminderMessageID, "verification reminder after verification")
 	}
 	if pending.PrivateMessageID != 0 {
-		if _, err := b.Bot.DeleteMessage(userID, pending.PrivateMessageID, nil); err != nil {
-			log.Printf("[bot] delete private verification message after verification error: %v", err)
-		}
+		deleteMessageIfExists(b.Bot, token.UserID, pending.PrivateMessageID, "private verification after verification")
 	}
 
-	userLanguage := b.targetUserLanguage(chatID, userID)
-	text := tr(userLanguage, "verification_success", chatID)
-	successMsg, err := b.Bot.SendMessage(userID, text, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	userLanguage := userLanguageFromPending(pending)
+	text := tr(userLanguage, "verification_success", token.ChatID)
+	successMsg, err := sendMessageWithLog(b.Bot, token.UserID, text, &gotgbot.SendMessageOpts{ParseMode: "HTML"}, "verification success private")
 	if err != nil {
-		log.Printf("[bot] send verification success private message error: %v", err)
 		return
 	}
 
-	scheduleMessageDeletion(b.Bot, userID, successMsg.MessageId, manualModerationResultTTL, "verification success private")
+	scheduleMessageDeletion(b.Bot, token.UserID, successMsg.MessageId, manualModerationResultTTL, "verification success private")
 }

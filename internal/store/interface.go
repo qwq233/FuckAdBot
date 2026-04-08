@@ -16,6 +16,25 @@ type PendingVerification struct {
 	ReplyToMessageID  int64
 }
 
+type PendingAction string
+
+const (
+	PendingActionApprove PendingAction = "approve"
+	PendingActionReject  PendingAction = "reject"
+	PendingActionExpire  PendingAction = "expire"
+	PendingActionCancel  PendingAction = "cancel"
+)
+
+type PendingResolutionResult struct {
+	Matched      bool
+	Action       PendingAction
+	Pending      *PendingVerification
+	Verified     bool
+	Rejected     bool
+	WarningCount int
+	ShouldBan    bool
+}
+
 type Store interface {
 	Close() error
 
@@ -35,8 +54,11 @@ type Store interface {
 	// Pending verification window
 	HasActivePending(chatID, userID int64) (bool, error)
 	GetPending(chatID, userID int64) (*PendingVerification, error)
+	CreatePendingIfAbsent(pending PendingVerification) (created bool, existing *PendingVerification, err error)
 	SetPending(pending PendingVerification) error
+	UpdatePendingMetadataByToken(pending PendingVerification) (updated bool, err error)
 	ClearPending(chatID, userID int64) error
+	ResolvePendingByToken(chatID, userID int64, timestamp int64, randomToken string, action PendingAction, maxWarnings int) (PendingResolutionResult, error)
 	ClearUserVerificationStateEverywhere(userID int64) error
 
 	// Warning count

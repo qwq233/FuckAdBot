@@ -73,17 +73,15 @@ func main() {
 	// Initialize captcha server with verification callback
 	var cs *captcha.Server
 	if cfg.Turnstile.Enabled {
-		cs = captcha.NewServer(&cfg.Turnstile, st, cfg.Moderation.GetVerifyWindow(), cfg.Bot.Token, func(chatID, userID int64) {
-			log.Printf("[captcha] User %d verified in chat %d", userID, chatID)
-			b.HandleVerificationSuccess(chatID, userID)
+		cs = captcha.NewServer(&cfg.Turnstile, st, cfg.Moderation.GetVerifyWindow(), cfg.Bot.Token, func(token captcha.VerifiedToken) {
+			log.Printf("[captcha] User %d verified in chat %d", token.UserID, token.ChatID)
+			b.HandleVerificationSuccess(token)
 		})
 		b.Captcha = cs
 
-		go func() {
-			if err := cs.Start(); err != nil {
-				log.Printf("[captcha] Server stopped: %v", err)
-			}
-		}()
+		if err := cs.Start(); err != nil {
+			log.Fatalf("Failed to start captcha server: %v", err)
+		}
 
 		// Stop captcha server on shutdown
 		go func() {

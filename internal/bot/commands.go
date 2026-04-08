@@ -10,6 +10,7 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
+	"github.com/qwq233/fuckadbot/internal/store"
 )
 
 // isBotAdmin checks if the user is a bot-level admin (from config).
@@ -26,6 +27,7 @@ func (b *Bot) isBotAdmin(userID int64) bool {
 func (b *Bot) isGroupAdmin(bot *gotgbot.Bot, chatID, userID int64) bool {
 	member, err := bot.GetChatMember(chatID, userID, nil)
 	if err != nil {
+		log.Printf("[bot] GetChatMember error: %v", err)
 		return false
 	}
 	status := member.MergeChatMember().Status
@@ -566,17 +568,10 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 	}
 	requestLanguage = b.requestLanguageForUser(msg.From)
 
-	checkText := buildCheckText(msg.From)
-	if chat := b.cachedUserChat(userID, func(userID int64) (*gotgbot.ChatFullInfo, error) {
-		return bot.GetChat(userID, nil)
-	}); chat != nil && chat.Bio != "" {
-		checkText += " " + chat.Bio
-	}
-
-	if matched := b.Blacklist.MatchWithGroup(chatID, checkText); matched != "" {
+	if matched := b.matchUserAgainstBlacklist(bot, chatID, msg.From); matched != "" {
 		log.Printf("[bot] blacklist hit during /start verification: user=%d word=%q in chat=%d", userID, matched, chatID)
-		if err := b.Store.ClearPending(chatID, userID); err != nil {
-			log.Printf("[bot] store.ClearPending error after blacklist hit in /start: %v", err)
+		if _, err := b.Store.ResolvePendingByToken(chatID, userID, pending.Timestamp, pending.RandomToken, store.PendingActionCancel, b.Config.Moderation.MaxWarnings); err != nil {
+			log.Printf("[bot] resolve pending error after blacklist hit in /start: %v", err)
 		}
 		if pending.OriginalMessageID != 0 {
 			deleteMessageIfExists(bot, chatID, pending.OriginalMessageID, "pending original after /start blacklist hit")
@@ -584,9 +579,7 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 		if pending.ReminderMessageID != 0 {
 			deleteMessageIfExists(bot, chatID, pending.ReminderMessageID, "verification reminder after /start blacklist hit")
 		}
-		if _, err := bot.BanChatMember(chatID, userID, &gotgbot.BanChatMemberOpts{}); err != nil {
-			log.Printf("[bot] ban user after /start blacklist hit error: %v", err)
-		}
+		banChatMember(bot, chatID, userID, "blacklist hit during /start")
 		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_blacklist_hit", escapeHTML(matched)), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 		return nil
 	}
@@ -598,12 +591,10 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 
 	verifyURL := b.Captcha.GenerateVerifyURL(chatID, userID, pending.Timestamp, pending.RandomToken)
 	if pending.PrivateMessageID != 0 {
-		if _, err := bot.DeleteMessage(msg.Chat.Id, pending.PrivateMessageID, nil); err != nil {
-			log.Printf("[bot] delete previous private verification message error: %v", err)
-		}
+		deleteMessageIfExists(bot, msg.Chat.Id, pending.PrivateMessageID, "previous private verification")
 	}
 
-	privateVerificationMsg, err := bot.SendMessage(msg.Chat.Id,
+	privateVerificationMsg, err := sendMessageWithLog(bot, msg.Chat.Id,
 		tr(requestLanguage, "private_verification_prompt"),
 		&gotgbot.SendMessageOpts{
 			ReplyMarkup: gotgbot.InlineKeyboardMarkup{
@@ -612,16 +603,22 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 				}},
 			},
 		},
+		"private verification",
 	)
 	if err != nil {
-		log.Printf("[bot] send private verification link error: %v", err)
 		return nil
 	}
 
 	pending.PrivateMessageID = privateVerificationMsg.MessageId
 	pending.UserLanguage = requestLanguage
-	if err := b.Store.SetPending(*pending); err != nil {
-		log.Printf("[bot] store.SetPending error after private verification message: %v", err)
+	updated, err := b.Store.UpdatePendingMetadataByToken(*pending)
+	if err != nil {
+		log.Printf("[bot] store.UpdatePendingMetadataByToken error after private verification message: %v", err)
+		deleteMessageIfExists(bot, msg.Chat.Id, privateVerificationMsg.MessageId, "private verification after store update failure")
+		return nil
+	}
+	if !updated {
+		deleteMessageIfExists(bot, msg.Chat.Id, privateVerificationMsg.MessageId, "private verification after pending race")
 	}
 
 	return nil
@@ -635,9 +632,23 @@ func escapeHTML(s string) string {
 
 func (b *Bot) approveUser(chatID, userID int64) error {
 	b.cancelUserTimers(chatID, userID)
+
+	pending, err := b.Store.GetPending(chatID, userID)
+	if err != nil {
+		return err
+	}
+	if pending != nil {
+		result, err := b.Store.ResolvePendingByToken(chatID, userID, pending.Timestamp, pending.RandomToken, store.PendingActionApprove, b.Config.Moderation.MaxWarnings)
+		if err != nil {
+			return err
+		}
+		if result.Matched {
+			return nil
+		}
+	}
+
 	return errors.Join(
 		b.Store.SetVerified(chatID, userID),
-		b.Store.ClearPending(chatID, userID),
 		b.Store.ResetWarningCount(chatID, userID),
 		b.Store.RemoveRejected(chatID, userID),
 	)
@@ -651,17 +662,21 @@ func (b *Bot) rejectUser(chatID, userID int64) error {
 	}
 
 	if pending != nil {
-		if pending.OriginalMessageID != 0 {
-			deleteMessageIfExists(b.Bot, chatID, pending.OriginalMessageID, "pending original after reject")
+		result, err := b.Store.ResolvePendingByToken(chatID, userID, pending.Timestamp, pending.RandomToken, store.PendingActionReject, b.Config.Moderation.MaxWarnings)
+		if err != nil {
+			return err
 		}
-		if pending.PrivateMessageID != 0 {
-			deleteMessageIfExists(b.Bot, userID, pending.PrivateMessageID, "private verification message after reject")
+		if result.Matched {
+			if result.Pending != nil {
+				deleteMessageIfExists(b.Bot, chatID, result.Pending.OriginalMessageID, "pending original after reject")
+				deleteMessageIfExists(b.Bot, userID, result.Pending.PrivateMessageID, "private verification message after reject")
+			}
+			return nil
 		}
 	}
 
 	return errors.Join(
 		b.Store.SetRejected(chatID, userID),
-		b.Store.ClearPending(chatID, userID),
 		b.Store.ResetWarningCount(chatID, userID),
 		b.Store.RemoveVerified(chatID, userID),
 	)
