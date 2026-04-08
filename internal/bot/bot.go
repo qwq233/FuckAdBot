@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -97,6 +98,21 @@ func (b *Bot) cancelUserTimers(chatID, userID int64) {
 	delete(b.timers, key)
 }
 
+func (b *Bot) cancelAllTimersForUser(userID int64) {
+	b.timersMu.Lock()
+	defer b.timersMu.Unlock()
+
+	for key, timers := range b.timers {
+		if key.userID != userID {
+			continue
+		}
+		for _, t := range timers {
+			t.Stop()
+		}
+		delete(b.timers, key)
+	}
+}
+
 func (b *Bot) scheduleUserTimer(chatID, userID int64, delay time.Duration, fn func()) *time.Timer {
 	trackedTimer := make(chan *time.Timer, 1)
 	timer := time.AfterFunc(delay, func() {
@@ -139,6 +155,10 @@ func (b *Bot) Start(ctx context.Context) error {
 
 	// Register message handler for group/supergroup messages (lower priority)
 	dispatcher.AddHandler(handlers.NewMessage(message.Supergroup, b.handleMessage))
+
+	if err := b.restorePendingVerifications(b.Bot); err != nil {
+		return fmt.Errorf("restore pending verifications: %w", err)
+	}
 
 	log.Printf("[bot] Starting polling...")
 	err := updater.StartPolling(b.Bot, &ext.PollingOpts{

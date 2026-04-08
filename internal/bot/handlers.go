@@ -266,40 +266,81 @@ func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, pending store.PendingVerif
 
 func (b *Bot) scheduleOriginalMessageDeletion(bot *gotgbot.Bot, pending store.PendingVerification) {
 	originalMessageTTL := b.Config.Moderation.GetOriginalMessageTTL()
-	if originalMessageTTL <= 0 {
+	if originalMessageTTL <= 0 || pending.OriginalMessageID == 0 {
 		return
 	}
 
-	b.scheduleUserTimer(pending.ChatID, pending.UserID, originalMessageTTL, func() {
+	deleteAt := time.Unix(pending.Timestamp, 0).UTC().Add(originalMessageTTL)
+	delay := deleteAt.Sub(time.Now().UTC())
+	if delay <= 0 {
+		if err := b.deletePendingOriginalMessage(bot, &pending, false); err != nil {
+			log.Printf("[bot] delete pending original message after ttl error: %v", err)
+		}
+		return
+	}
+
+	b.scheduleUserTimer(pending.ChatID, pending.UserID, delay, func() {
 		if err := b.deletePendingOriginalMessage(bot, &pending, false); err != nil {
 			log.Printf("[bot] delete pending original message after ttl error: %v", err)
 		}
 	})
 }
 
-func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, pending *store.PendingVerification, force bool) error {
+func (b *Bot) pendingForOriginalMessageDeletion(pending *store.PendingVerification, force bool) (*store.PendingVerification, bool, error) {
 	if pending == nil || pending.OriginalMessageID == 0 {
-		return nil
+		return nil, false, nil
 	}
 
 	verified, err := b.Store.IsVerified(pending.ChatID, pending.UserID)
 	if err != nil {
-		return fmt.Errorf("check verified status before deleting original message: %w", err)
+		return nil, false, fmt.Errorf("check verified status before deleting original message: %w", err)
 	}
 	if verified {
+		return nil, false, nil
+	}
+
+	if force {
+		return pending, false, nil
+	}
+
+	currentPending, err := b.Store.GetPending(pending.ChatID, pending.UserID)
+	if err != nil {
+		return nil, false, fmt.Errorf("read current pending before deleting original message: %w", err)
+	}
+	if currentPending == nil {
+		return nil, false, nil
+	}
+	if currentPending.Timestamp != pending.Timestamp || currentPending.RandomToken != pending.RandomToken {
+		return nil, false, nil
+	}
+	if currentPending.OriginalMessageID == 0 {
+		return nil, false, nil
+	}
+
+	deleteAt := time.Unix(currentPending.Timestamp, 0).UTC().Add(b.Config.Moderation.GetOriginalMessageTTL())
+	if time.Now().UTC().Before(deleteAt) {
+		return nil, false, nil
+	}
+
+	return currentPending, true, nil
+}
+
+func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, pending *store.PendingVerification, force bool) error {
+	targetPending, shouldPersist, err := b.pendingForOriginalMessageDeletion(pending, force)
+	if err != nil {
+		return err
+	}
+	if targetPending == nil {
 		return nil
 	}
 
-	if !force {
-		deleteAt := time.Unix(pending.Timestamp, 0).UTC().Add(b.Config.Moderation.GetOriginalMessageTTL())
-		if time.Now().UTC().Before(deleteAt) {
-			return nil
-		}
+	deleteMessageIfExists(bot, targetPending.ChatID, targetPending.OriginalMessageID, "pending original")
+	if !shouldPersist {
+		return nil
 	}
 
-	deleteMessageIfExists(bot, pending.ChatID, pending.OriginalMessageID, "pending original")
-	pending.OriginalMessageID = 0
-	updated, err := b.Store.UpdatePendingMetadataByToken(*pending)
+	targetPending.OriginalMessageID = 0
+	updated, err := b.Store.UpdatePendingMetadataByToken(*targetPending)
 	if err != nil {
 		return fmt.Errorf("persist original message deletion state: %w", err)
 	}

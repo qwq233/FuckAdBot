@@ -50,6 +50,8 @@ func (s *stubStore) GetPending(chatID, userID int64) (*store.PendingVerification
 	return nil, nil
 }
 
+func (s *stubStore) ListPendingVerifications() ([]store.PendingVerification, error) { return nil, nil }
+
 func (s *stubStore) CreatePendingIfAbsent(pending store.PendingVerification) (bool, *store.PendingVerification, error) {
 	return true, nil, nil
 }

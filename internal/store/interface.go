@@ -54,6 +54,7 @@ type Store interface {
 	// Pending verification window
 	HasActivePending(chatID, userID int64) (bool, error)
 	GetPending(chatID, userID int64) (*PendingVerification, error)
+	ListPendingVerifications() ([]PendingVerification, error)
 	CreatePendingIfAbsent(pending PendingVerification) (created bool, existing *PendingVerification, err error)
 	SetPending(pending PendingVerification) error
 	UpdatePendingMetadataByToken(pending PendingVerification) (updated bool, err error)

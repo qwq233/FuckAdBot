@@ -357,6 +357,7 @@ func (b *Bot) cmdResetAllVerify(bot *gotgbot.Bot, ctx *ext.Context) error {
 		})
 		return nil
 	}
+	b.cancelAllTimersForUser(userID)
 
 	log.Printf("[bot] reset all verification state via command: admin=%d target=%d", msg.From.Id, userID)
 	bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "resetverify_success", userID), &gotgbot.SendMessageOpts{

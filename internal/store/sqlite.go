@@ -422,6 +422,32 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 	return pending, nil
 }
 
+func (s *SQLiteStore) ListPendingVerifications() ([]PendingVerification, error) {
+	rows, err := s.db.Query(
+		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		 FROM pending_verifications
+		 ORDER BY expire_at ASC, chat_id ASC, user_id ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pendingVerifications []PendingVerification
+	for rows.Next() {
+		pending, err := scanPending(rows)
+		if err != nil {
+			return nil, err
+		}
+		if pending == nil {
+			continue
+		}
+		pendingVerifications = append(pendingVerifications, *pending)
+	}
+
+	return pendingVerifications, rows.Err()
+}
+
 func (s *SQLiteStore) CreatePendingIfAbsent(pending PendingVerification) (bool, *PendingVerification, error) {
 	if strings.TrimSpace(pending.UserLanguage) == "" {
 		pending.UserLanguage = "zh-cn"
