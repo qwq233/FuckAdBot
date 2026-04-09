@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -556,6 +557,38 @@ func TestSQLiteStoreUserLanguagePreferenceRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreGetUserLanguagePreferenceReturnsBlankWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	language, err := store.GetUserLanguagePreference(42)
+	if err != nil {
+		t.Fatalf("GetUserLanguagePreference() error = %v", err)
+	}
+	if language != "" {
+		t.Fatalf("GetUserLanguagePreference() = %q, want blank for unset user", language)
+	}
+}
+
+func TestSQLiteStoreSetUserLanguagePreferenceRejectsBlank(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetUserLanguagePreference(42, "   "); err == nil {
+		t.Fatal("SetUserLanguagePreference() error = nil, want validation error for blank language")
+	}
+}
+
 func TestSQLiteStoreClearUserVerificationStateEverywhere(t *testing.T) {
 	t.Parallel()
 
@@ -757,6 +790,144 @@ func TestCreatePendingIfAbsentReturnsExistingActivePending(t *testing.T) {
 	}
 }
 
+func TestCreatePendingIfAbsentReturnsExistingExpiredPending(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	existingPending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Add(-10 * time.Minute).Unix(),
+		RandomToken:  "expired-token",
+		ExpireAt:     time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second),
+	}
+	if err := store.SetPending(existingPending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	created, existing, err := store.CreatePendingIfAbsent(storepkg.PendingVerification{
+		ChatID:       existingPending.ChatID,
+		UserID:       existingPending.UserID,
+		UserLanguage: "zh-cn",
+		Timestamp:    existingPending.Timestamp + 1,
+		RandomToken:  "new-token",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreatePendingIfAbsent() error = %v", err)
+	}
+	if created {
+		t.Fatal("CreatePendingIfAbsent() created = true, want false for existing expired pending snapshot")
+	}
+	if existing == nil || existing.RandomToken != existingPending.RandomToken {
+		t.Fatalf("CreatePendingIfAbsent() existing = %+v, want expired pending snapshot", existing)
+	}
+}
+
+func TestCreatePendingIfAbsentSkipsVerifiedAndRejectedUsers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("verified", func(t *testing.T) {
+		t.Parallel()
+
+		store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("NewSQLiteStore() error = %v", err)
+		}
+		defer store.Close()
+
+		if err := store.SetVerified(-100123, 42); err != nil {
+			t.Fatalf("SetVerified() error = %v", err)
+		}
+
+		created, existing, err := store.CreatePendingIfAbsent(storepkg.PendingVerification{
+			ChatID:      -100123,
+			UserID:      42,
+			Timestamp:   time.Now().UTC().Unix(),
+			RandomToken: "token-a",
+			ExpireAt:    time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+		})
+		if err != nil {
+			t.Fatalf("CreatePendingIfAbsent() error = %v", err)
+		}
+		if created || existing != nil {
+			t.Fatalf("CreatePendingIfAbsent() = (%v, %+v), want (false, nil) for verified user", created, existing)
+		}
+		if pending, err := store.GetPending(-100123, 42); err != nil || pending != nil {
+			t.Fatalf("GetPending() = (%+v, %v), want (nil, nil)", pending, err)
+		}
+	})
+
+	t.Run("rejected", func(t *testing.T) {
+		t.Parallel()
+
+		store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("NewSQLiteStore() error = %v", err)
+		}
+		defer store.Close()
+
+		if err := store.SetRejected(-100123, 42); err != nil {
+			t.Fatalf("SetRejected() error = %v", err)
+		}
+
+		created, existing, err := store.CreatePendingIfAbsent(storepkg.PendingVerification{
+			ChatID:      -100123,
+			UserID:      42,
+			Timestamp:   time.Now().UTC().Unix(),
+			RandomToken: "token-a",
+			ExpireAt:    time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+		})
+		if err != nil {
+			t.Fatalf("CreatePendingIfAbsent() error = %v", err)
+		}
+		if created || existing != nil {
+			t.Fatalf("CreatePendingIfAbsent() = (%v, %+v), want (false, nil) for rejected user", created, existing)
+		}
+		if pending, err := store.GetPending(-100123, 42); err != nil || pending != nil {
+			t.Fatalf("GetPending() = (%+v, %v), want (nil, nil)", pending, err)
+		}
+	})
+}
+
+func TestCreatePendingIfAbsentDefaultsBlankLanguage(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	created, existing, err := store.CreatePendingIfAbsent(storepkg.PendingVerification{
+		ChatID:      -100123,
+		UserID:      42,
+		Timestamp:   time.Now().UTC().Unix(),
+		RandomToken: "token-a",
+		ExpireAt:    time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreatePendingIfAbsent() error = %v", err)
+	}
+	if !created || existing != nil {
+		t.Fatalf("CreatePendingIfAbsent() = (%v, %+v), want (true, nil)", created, existing)
+	}
+
+	gotPending, err := store.GetPending(-100123, 42)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if gotPending == nil || gotPending.UserLanguage != "zh-cn" {
+		t.Fatalf("GetPending() = %+v, want default language zh-cn", gotPending)
+	}
+}
+
 func TestResolvePendingByTokenApproveSetsVerifiedAndClearsPending(t *testing.T) {
 	t.Parallel()
 
@@ -882,32 +1053,57 @@ func TestResolvePendingByTokenConcurrentOnlyOneMutationWins(t *testing.T) {
 		t.Fatalf("SetPending() error = %v", err)
 	}
 
-	results := make(chan storepkg.PendingResolutionResult, 2)
-	errs := make(chan error, 2)
+	type resolutionAttempt struct {
+		result storepkg.PendingResolutionResult
+		err    error
+	}
+	attempts := make(chan resolutionAttempt, 2)
 
 	go func() {
 		result, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionExpire, 3)
-		results <- result
-		errs <- err
+		attempts <- resolutionAttempt{result: result, err: err}
 	}()
 	go func() {
 		result, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionApprove, 3)
-		results <- result
-		errs <- err
+		attempts <- resolutionAttempt{result: result, err: err}
 	}()
 
 	matchedCount := 0
+	var matchedResult storepkg.PendingResolutionResult
 	for i := 0; i < 2; i++ {
-		if err := <-errs; err != nil {
-			t.Fatalf("ResolvePendingByToken() concurrent error = %v", err)
+		attempt := <-attempts
+		if attempt.err != nil {
+			t.Fatalf("ResolvePendingByToken() concurrent error = %v", attempt.err)
 		}
-		if result := <-results; result.Matched {
+		if attempt.result.Matched {
 			matchedCount++
+			matchedResult = attempt.result
 		}
 	}
 
 	if matchedCount != 1 {
 		t.Fatalf("matched resolution count = %d, want 1", matchedCount)
+	}
+	if pendingAfter, err := store.GetPending(pending.ChatID, pending.UserID); err != nil || pendingAfter != nil {
+		t.Fatalf("GetPending() = (%+v, %v), want (nil, nil) after winning mutation", pendingAfter, err)
+	}
+	verified, err := store.IsVerified(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("IsVerified() error = %v", err)
+	}
+	warnings, err := store.GetWarningCount(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetWarningCount() error = %v", err)
+	}
+	if matchedResult.Action == storepkg.PendingActionApprove {
+		if !verified || warnings != 0 {
+			t.Fatalf("final state after approve win = verified:%v warnings:%d, want verified with zero warnings", verified, warnings)
+		}
+	}
+	if matchedResult.Action == storepkg.PendingActionExpire {
+		if verified || warnings != 1 {
+			t.Fatalf("final state after expire win = verified:%v warnings:%d, want unverified with one warning", verified, warnings)
+		}
 	}
 }
 
@@ -929,6 +1125,7 @@ func TestCreatePendingIfAbsentConcurrentOnlyOneCreateWins(t *testing.T) {
 
 	type createResult struct {
 		created bool
+		token   string
 		err     error
 	}
 
@@ -940,11 +1137,12 @@ func TestCreatePendingIfAbsentConcurrentOnlyOneCreateWins(t *testing.T) {
 			pending.Timestamp = time.Now().UTC().Unix() + int64(i)
 			pending.RandomToken = fmt.Sprintf("token-%d", i)
 			created, _, err := store.CreatePendingIfAbsent(pending)
-			results <- createResult{created: created, err: err}
+			results <- createResult{created: created, token: pending.RandomToken, err: err}
 		}()
 	}
 
 	createdCount := 0
+	winningTokens := make(map[string]struct{})
 	for i := 0; i < 2; i++ {
 		result := <-results
 		if result.err != nil {
@@ -952,10 +1150,517 @@ func TestCreatePendingIfAbsentConcurrentOnlyOneCreateWins(t *testing.T) {
 		}
 		if result.created {
 			createdCount++
+			winningTokens[result.token] = struct{}{}
 		}
 	}
 
 	if createdCount != 1 {
 		t.Fatalf("created pending count = %d, want 1", createdCount)
+	}
+	gotPending, err := store.GetPending(base.ChatID, base.UserID)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if gotPending == nil {
+		t.Fatal("GetPending() = nil, want persisted pending record")
+	}
+	if _, ok := winningTokens[gotPending.RandomToken]; !ok {
+		t.Fatalf("GetPending().RandomToken = %q, want winning token from successful creator", gotPending.RandomToken)
+	}
+}
+
+func TestSQLiteStoreHasActivePendingReflectsExpiry(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	active, err := store.HasActivePending(-100123, 42)
+	if err != nil {
+		t.Fatalf("HasActivePending() error = %v", err)
+	}
+	if active {
+		t.Fatal("HasActivePending() = true, want false for empty store")
+	}
+
+	if err := store.SetPending(storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "active-token",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}); err != nil {
+		t.Fatalf("SetPending(active) error = %v", err)
+	}
+
+	active, err = store.HasActivePending(-100123, 42)
+	if err != nil {
+		t.Fatalf("HasActivePending(active) error = %v", err)
+	}
+	if !active {
+		t.Fatal("HasActivePending() = false, want true for active pending")
+	}
+
+	if err := store.SetPending(storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "expired-token",
+		ExpireAt:     time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second),
+	}); err != nil {
+		t.Fatalf("SetPending(expired) error = %v", err)
+	}
+
+	active, err = store.HasActivePending(-100123, 42)
+	if err != nil {
+		t.Fatalf("HasActivePending(expired) error = %v", err)
+	}
+	if active {
+		t.Fatal("HasActivePending() = true, want false for expired pending")
+	}
+}
+
+func TestSQLiteStoreListPendingVerificationsSorted(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	base := time.Now().UTC().Truncate(time.Second)
+	records := []storepkg.PendingVerification{
+		{ChatID: -100200, UserID: 7, UserLanguage: "en", Timestamp: 3, RandomToken: "c", ExpireAt: base.Add(2 * time.Minute)},
+		{ChatID: -100100, UserID: 9, UserLanguage: "en", Timestamp: 2, RandomToken: "b", ExpireAt: base.Add(1 * time.Minute)},
+		{ChatID: -100100, UserID: 8, UserLanguage: "en", Timestamp: 1, RandomToken: "a", ExpireAt: base.Add(1 * time.Minute)},
+	}
+
+	for _, pending := range records {
+		if err := store.SetPending(pending); err != nil {
+			t.Fatalf("SetPending(%+v) error = %v", pending, err)
+		}
+	}
+
+	got, err := store.ListPendingVerifications()
+	if err != nil {
+		t.Fatalf("ListPendingVerifications() error = %v", err)
+	}
+
+	want := []storepkg.PendingVerification{records[2], records[1], records[0]}
+	if len(got) != len(want) {
+		t.Fatalf("len(ListPendingVerifications()) = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ChatID != want[i].ChatID || got[i].UserID != want[i].UserID || got[i].RandomToken != want[i].RandomToken {
+			t.Fatalf("ListPendingVerifications()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSQLiteStoreUpdatePendingMetadataByToken(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	pending := storepkg.PendingVerification{
+		ChatID:            -100123,
+		UserID:            42,
+		UserLanguage:      "zh-cn",
+		Timestamp:         1712300000,
+		RandomToken:       "token-a",
+		ExpireAt:          time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+		ReminderMessageID: 7001,
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	pending.UserLanguage = "en"
+	pending.ExpireAt = pending.ExpireAt.Add(2 * time.Minute)
+	pending.ReminderMessageID = 8001
+	pending.PrivateMessageID = 9001
+	pending.OriginalMessageID = 9101
+	pending.MessageThreadID = 77
+	pending.ReplyToMessageID = 88
+
+	updated, err := store.UpdatePendingMetadataByToken(pending)
+	if err != nil {
+		t.Fatalf("UpdatePendingMetadataByToken() error = %v", err)
+	}
+	if !updated {
+		t.Fatal("UpdatePendingMetadataByToken() = false, want true")
+	}
+
+	got, err := store.GetPending(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetPending() = nil, want updated row")
+	}
+	if got.UserLanguage != "en" || got.ReminderMessageID != 8001 || got.PrivateMessageID != 9001 || got.OriginalMessageID != 9101 || got.MessageThreadID != 77 || got.ReplyToMessageID != 88 {
+		t.Fatalf("updated pending = %+v, want metadata persisted", *got)
+	}
+}
+
+func TestSQLiteStoreUpdatePendingMetadataByTokenReturnsFalseForMismatch(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetPending(storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    1,
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	updated, err := store.UpdatePendingMetadataByToken(storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "zh-cn",
+		Timestamp:    1,
+		RandomToken:  "token-b",
+		ExpireAt:     time.Now().UTC().Add(10 * time.Minute).Truncate(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("UpdatePendingMetadataByToken() error = %v", err)
+	}
+	if updated {
+		t.Fatal("UpdatePendingMetadataByToken() = true, want false for token mismatch")
+	}
+}
+
+func TestSQLiteStoreStatusRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetVerified(-100123, 42); err != nil {
+		t.Fatalf("SetVerified() error = %v", err)
+	}
+	verified, err := store.IsVerified(-100123, 42)
+	if err != nil {
+		t.Fatalf("IsVerified() error = %v", err)
+	}
+	if !verified {
+		t.Fatal("IsVerified() = false, want true after SetVerified")
+	}
+
+	if err := store.SetRejected(-100123, 42); err != nil {
+		t.Fatalf("SetRejected() error = %v", err)
+	}
+	verified, err = store.IsVerified(-100123, 42)
+	if err != nil {
+		t.Fatalf("IsVerified() after SetRejected error = %v", err)
+	}
+	if verified {
+		t.Fatal("IsVerified() = true, want false after SetRejected overwrites status")
+	}
+	rejected, err := store.IsRejected(-100123, 42)
+	if err != nil {
+		t.Fatalf("IsRejected() error = %v", err)
+	}
+	if !rejected {
+		t.Fatal("IsRejected() = false, want true after SetRejected")
+	}
+
+	if err := store.RemoveRejected(-100123, 42); err != nil {
+		t.Fatalf("RemoveRejected() error = %v", err)
+	}
+	rejected, err = store.IsRejected(-100123, 42)
+	if err != nil {
+		t.Fatalf("IsRejected() after RemoveRejected error = %v", err)
+	}
+	if rejected {
+		t.Fatal("IsRejected() = true, want false after RemoveRejected")
+	}
+}
+
+func TestSQLiteStoreRemoveVerifiedClearPendingAndResetWarnings(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetVerified(-100123, 42); err != nil {
+		t.Fatalf("SetVerified() error = %v", err)
+	}
+	if err := store.RemoveVerified(-100123, 42); err != nil {
+		t.Fatalf("RemoveVerified() error = %v", err)
+	}
+	verified, err := store.IsVerified(-100123, 42)
+	if err != nil {
+		t.Fatalf("IsVerified() error = %v", err)
+	}
+	if verified {
+		t.Fatal("IsVerified() = true, want false after RemoveVerified")
+	}
+
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+	if err := store.ClearPending(pending.ChatID, pending.UserID); err != nil {
+		t.Fatalf("ClearPending() error = %v", err)
+	}
+	if gotPending, err := store.GetPending(pending.ChatID, pending.UserID); err != nil || gotPending != nil {
+		t.Fatalf("GetPending() = (%+v, %v), want (nil, nil) after ClearPending", gotPending, err)
+	}
+
+	if _, err := store.IncrWarningCount(-100123, 42); err != nil {
+		t.Fatalf("IncrWarningCount() error = %v", err)
+	}
+	if err := store.ResetWarningCount(-100123, 42); err != nil {
+		t.Fatalf("ResetWarningCount() error = %v", err)
+	}
+	if warnings, err := store.GetWarningCount(-100123, 42); err != nil || warnings != 0 {
+		t.Fatalf("GetWarningCount() = (%d, %v), want (0, nil) after ResetWarningCount", warnings, err)
+	}
+}
+
+func TestSQLiteStoreBlacklistWordValidation(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.AddBlacklistWord(0, "   ", "admin"); err == nil {
+		t.Fatal("AddBlacklistWord() error = nil, want validation error for blank word")
+	}
+	if err := store.RemoveBlacklistWord(0, "   "); err == nil {
+		t.Fatal("RemoveBlacklistWord() error = nil, want validation error for blank word")
+	}
+}
+
+func TestSQLiteStoreResolvePendingByTokenCancelClearsPendingWithoutStatusChange(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	result, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionCancel, 3)
+	if err != nil {
+		t.Fatalf("ResolvePendingByToken(cancel) error = %v", err)
+	}
+	if !result.Matched {
+		t.Fatalf("ResolvePendingByToken(cancel) = %+v, want matched result", result)
+	}
+
+	gotPending, err := store.GetPending(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if gotPending != nil {
+		t.Fatalf("GetPending() = %+v, want nil after cancel", *gotPending)
+	}
+	verified, err := store.IsVerified(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("IsVerified() error = %v", err)
+	}
+	rejected, err := store.IsRejected(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("IsRejected() error = %v", err)
+	}
+	if verified || rejected {
+		t.Fatalf("status after cancel = verified:%v rejected:%v, want both false", verified, rejected)
+	}
+}
+
+func TestSQLiteStoreResolvePendingByTokenRejectSetsRejectedAndClearsWarnings(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+	if _, err := store.IncrWarningCount(pending.ChatID, pending.UserID); err != nil {
+		t.Fatalf("IncrWarningCount() error = %v", err)
+	}
+
+	result, err := store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingActionReject, 3)
+	if err != nil {
+		t.Fatalf("ResolvePendingByToken(reject) error = %v", err)
+	}
+	if !result.Matched || !result.Rejected {
+		t.Fatalf("ResolvePendingByToken(reject) = %+v, want matched rejected result", result)
+	}
+
+	rejected, err := store.IsRejected(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("IsRejected() error = %v", err)
+	}
+	if !rejected {
+		t.Fatal("IsRejected() = false, want true after reject")
+	}
+	warnings, err := store.GetWarningCount(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetWarningCount() error = %v", err)
+	}
+	if warnings != 0 {
+		t.Fatalf("GetWarningCount() = %d, want 0 after reject", warnings)
+	}
+}
+
+func TestSQLiteStoreResolvePendingByTokenRejectsUnsupportedAction(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	_, err = store.ResolvePendingByToken(pending.ChatID, pending.UserID, pending.Timestamp, pending.RandomToken, storepkg.PendingAction("unknown"), 3)
+	if err == nil {
+		t.Fatal("ResolvePendingByToken() error = nil, want unsupported action error")
+	}
+}
+
+func TestSQLiteStoreGetPendingDefaultsBlankLanguageFromLegacyRow(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := storepkg.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer rawDB.Close()
+
+	expireAt := time.Now().UTC().Add(5 * time.Minute)
+	if _, err := rawDB.Exec(
+		`INSERT INTO pending_verifications (
+			chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		-100123, 42, "", 1712300000, "legacy", expireAt.Format(time.RFC3339Nano), 1, 2, 3, 4, 5,
+	); err != nil {
+		t.Fatalf("insert legacy pending row error = %v", err)
+	}
+
+	got, err := store.GetPending(-100123, 42)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetPending() = nil, want legacy row")
+	}
+	if got.UserLanguage != "zh-cn" {
+		t.Fatalf("GetPending().UserLanguage = %q, want %q", got.UserLanguage, "zh-cn")
+	}
+	if !got.ExpireAt.Equal(expireAt) {
+		t.Fatalf("GetPending().ExpireAt = %v, want %v", got.ExpireAt, expireAt)
+	}
+}
+
+func TestSQLiteStoreGetAllBlacklistWordsAggregatesScopes(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	if err := store.AddBlacklistWord(0, "global", "admin"); err != nil {
+		t.Fatalf("AddBlacklistWord(global) error = %v", err)
+	}
+	if err := store.AddBlacklistWord(-100123, "group-a", "admin"); err != nil {
+		t.Fatalf("AddBlacklistWord(group-a) error = %v", err)
+	}
+	if err := store.AddBlacklistWord(-100123, "group-b", "admin"); err != nil {
+		t.Fatalf("AddBlacklistWord(group-b) error = %v", err)
+	}
+
+	got, err := store.GetAllBlacklistWords()
+	if err != nil {
+		t.Fatalf("GetAllBlacklistWords() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(got[0], []string{"global"}) {
+		t.Fatalf("GetAllBlacklistWords()[0] = %v, want %v", got[0], []string{"global"})
+	}
+	if !reflect.DeepEqual(got[-100123], []string{"group-a", "group-b"}) && !reflect.DeepEqual(got[-100123], []string{"group-b", "group-a"}) {
+		t.Fatalf("GetAllBlacklistWords() group scope = %v, want both group words", got[-100123])
 	}
 }

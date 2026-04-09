@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -101,7 +102,8 @@ func newModerationFlowBot(t *testing.T, st storepkg.Store) *Bot {
 				OriginalMessageTTL: "1m",
 			},
 		},
-		Store: st,
+		Store:  st,
+		timers: make(map[timerKey][]*time.Timer),
 	}
 }
 
@@ -252,6 +254,70 @@ func TestHandlePendingStateAfterCreateRaceStopsRejectedUser(t *testing.T) {
 	}
 }
 
+func TestHandlePendingStateAfterCreateRaceStopsVerifiedUser(t *testing.T) {
+	t.Parallel()
+
+	b := newModerationFlowBot(t, &moderationFlowStoreStub{verified: true})
+	incoming := &moderatedMessage{
+		message: &gotgbot.Message{MessageId: 1001},
+		user:    &gotgbot.User{Id: 42},
+		chatID:  -100123,
+	}
+
+	outcome := b.handlePendingStateAfterCreateRace(nil, incoming)
+	if outcome != pendingReservationComplete {
+		t.Fatalf("handlePendingStateAfterCreateRace() = %v, want %v", outcome, pendingReservationComplete)
+	}
+}
+
+func TestHandleExistingPendingReservationDeletesIncomingAndOldOriginalForActiveWindow(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	client := &recordingBotClient{}
+	b := newModerationFlowBot(t, store)
+	b.Bot = newRecordingTelegramBot(client)
+
+	existing := storepkg.PendingVerification{
+		ChatID:            -100123,
+		UserID:            42,
+		UserLanguage:      "en",
+		Timestamp:         time.Now().Add(-2 * time.Minute).UTC().Unix(),
+		RandomToken:       "token-a",
+		ExpireAt:          time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+		OriginalMessageID: 7001,
+	}
+	if err := store.SetPending(existing); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	incoming := &moderatedMessage{
+		message: &gotgbot.Message{MessageId: 2002},
+		user:    &gotgbot.User{Id: existing.UserID},
+		chatID:  existing.ChatID,
+	}
+	outcome := b.handleExistingPendingReservation(b.Bot, incoming, &existing)
+	if outcome != pendingReservationComplete {
+		t.Fatalf("handleExistingPendingReservation() = %v, want %v", outcome, pendingReservationComplete)
+	}
+
+	gotPending, err := store.GetPending(existing.ChatID, existing.UserID)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if gotPending == nil || gotPending.OriginalMessageID != 0 {
+		t.Fatalf("GetPending() = %+v, want original_message_id cleared", gotPending)
+	}
+	if got := len(client.RequestsByMethod("deleteMessage")); got != 2 {
+		t.Fatalf("deleteMessage request count = %d, want 2", got)
+	}
+}
+
 func TestHandleExpiredPendingWindowRetriesWhenUserStillNeedsVerification(t *testing.T) {
 	t.Parallel()
 
@@ -280,5 +346,267 @@ func TestHandleExpiredPendingWindowRetriesWhenUserStillNeedsVerification(t *test
 	outcome := b.handleExpiredPendingWindow(nil, incoming, pending)
 	if outcome != pendingReservationRetry {
 		t.Fatalf("handleExpiredPendingWindow() = %v, want %v", outcome, pendingReservationRetry)
+	}
+}
+
+func TestHandleExpiredPendingWindowCompletesForTerminalOutcomes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("verified", func(t *testing.T) {
+		t.Parallel()
+
+		client := &recordingBotClient{}
+		b := newModerationFlowBot(t, &moderationFlowStoreStub{
+			resolve: storepkg.PendingResolutionResult{
+				Matched:  true,
+				Pending:  &storepkg.PendingVerification{ChatID: -100123, UserID: 42, Timestamp: 1, RandomToken: "token-a", OriginalMessageID: 7001},
+				Verified: true,
+			},
+		})
+		b.Bot = newRecordingTelegramBot(client)
+		pending := &storepkg.PendingVerification{ChatID: -100123, UserID: 42, Timestamp: 1, RandomToken: "token-a", OriginalMessageID: 7001}
+		incoming := &moderatedMessage{
+			message:     &gotgbot.Message{MessageId: 2002},
+			user:        &gotgbot.User{Id: 42},
+			chatID:      -100123,
+			maxWarnings: 3,
+		}
+
+		outcome := b.handleExpiredPendingWindow(b.Bot, incoming, pending)
+		if outcome != pendingReservationComplete {
+			t.Fatalf("handleExpiredPendingWindow() = %v, want %v", outcome, pendingReservationComplete)
+		}
+		if got := len(client.RequestsByMethod("deleteMessage")); got != 1 {
+			t.Fatalf("deleteMessage request count = %d, want 1 for original message cleanup", got)
+		}
+		if got := len(client.RequestsByMethod("banChatMember")); got != 0 {
+			t.Fatalf("banChatMember request count = %d, want 0", got)
+		}
+	})
+
+	t.Run("rejected", func(t *testing.T) {
+		t.Parallel()
+
+		client := &recordingBotClient{}
+		b := newModerationFlowBot(t, &moderationFlowStoreStub{
+			resolve: storepkg.PendingResolutionResult{
+				Matched:  true,
+				Pending:  &storepkg.PendingVerification{ChatID: -100123, UserID: 42, Timestamp: 1, RandomToken: "token-a", OriginalMessageID: 7001},
+				Rejected: true,
+			},
+		})
+		b.Bot = newRecordingTelegramBot(client)
+		pending := &storepkg.PendingVerification{ChatID: -100123, UserID: 42, Timestamp: 1, RandomToken: "token-a", OriginalMessageID: 7001}
+		incoming := &moderatedMessage{
+			message:     &gotgbot.Message{MessageId: 2002},
+			user:        &gotgbot.User{Id: 42},
+			chatID:      -100123,
+			maxWarnings: 3,
+		}
+
+		outcome := b.handleExpiredPendingWindow(b.Bot, incoming, pending)
+		if outcome != pendingReservationComplete {
+			t.Fatalf("handleExpiredPendingWindow() = %v, want %v", outcome, pendingReservationComplete)
+		}
+		if got := len(client.RequestsByMethod("deleteMessage")); got != 2 {
+			t.Fatalf("deleteMessage request count = %d, want 2", got)
+		}
+		if got := len(client.RequestsByMethod("banChatMember")); got != 0 {
+			t.Fatalf("banChatMember request count = %d, want 0", got)
+		}
+	})
+
+	t.Run("ban", func(t *testing.T) {
+		t.Parallel()
+
+		client := &recordingBotClient{}
+		b := newModerationFlowBot(t, &moderationFlowStoreStub{
+			resolve: storepkg.PendingResolutionResult{
+				Matched:      true,
+				Pending:      &storepkg.PendingVerification{ChatID: -100123, UserID: 42, Timestamp: 1, RandomToken: "token-a", OriginalMessageID: 7001},
+				WarningCount: 3,
+				ShouldBan:    true,
+			},
+		})
+		b.Bot = newRecordingTelegramBot(client)
+		pending := &storepkg.PendingVerification{ChatID: -100123, UserID: 42, Timestamp: 1, RandomToken: "token-a", OriginalMessageID: 7001}
+		incoming := &moderatedMessage{
+			message:     &gotgbot.Message{MessageId: 2002},
+			user:        &gotgbot.User{Id: 42},
+			chatID:      -100123,
+			maxWarnings: 3,
+		}
+
+		outcome := b.handleExpiredPendingWindow(b.Bot, incoming, pending)
+		if outcome != pendingReservationComplete {
+			t.Fatalf("handleExpiredPendingWindow() = %v, want %v", outcome, pendingReservationComplete)
+		}
+		if got := len(client.RequestsByMethod("deleteMessage")); got != 2 {
+			t.Fatalf("deleteMessage request count = %d, want 2", got)
+		}
+		if got := len(client.RequestsByMethod("banChatMember")); got != 1 {
+			t.Fatalf("banChatMember request count = %d, want 1", got)
+		}
+	})
+}
+
+func TestSendVerificationReminderCancelsPendingOnSendFailure(t *testing.T) {
+	t.Parallel()
+
+	base := mustNewSQLiteStore(t)
+	client := &recordingBotClient{}
+	client.SetError("sendMessage", errors.New("boom"))
+	var actions []storepkg.PendingAction
+	b := newTestBot(t, &hookedStore{
+		Store: base,
+		resolvePendingByTokenHook: func(chatID, userID int64, timestamp int64, randomToken string, action storepkg.PendingAction, maxWarnings int) (storepkg.PendingResolutionResult, error) {
+			actions = append(actions, action)
+			return storepkg.PendingResolutionResult{Matched: true}, nil
+		},
+	}, client)
+
+	incoming := &moderatedMessage{
+		message:     &gotgbot.Message{MessageId: 1001},
+		user:        &gotgbot.User{Id: 42},
+		chatID:      -100123,
+		maxWarnings: 3,
+	}
+	pending := storepkg.PendingVerification{
+		ChatID:      incoming.chatID,
+		UserID:      incoming.user.Id,
+		Timestamp:   1,
+		RandomToken: "token-a",
+	}
+
+	reminderMsg, ok := b.sendVerificationReminder(b.Bot, incoming, pending, "hello")
+	if ok || reminderMsg != nil {
+		t.Fatalf("sendVerificationReminder() = (%+v, %v), want (nil, false)", reminderMsg, ok)
+	}
+	if len(actions) != 1 || actions[0] != storepkg.PendingActionCancel {
+		t.Fatalf("cancel actions = %v, want [cancel]", actions)
+	}
+	if got := len(client.RequestsByMethod("deleteMessage")); got != 1 {
+		t.Fatalf("deleteMessage request count = %d, want 1", got)
+	}
+}
+
+func TestPersistVerificationReminderHandlesUpdateFailureAndRace(t *testing.T) {
+	t.Parallel()
+
+	t.Run("update failure cancels pending", func(t *testing.T) {
+		t.Parallel()
+
+		base := mustNewSQLiteStore(t)
+		client := &recordingBotClient{}
+		var actions []storepkg.PendingAction
+		b := newTestBot(t, &hookedStore{
+			Store: base,
+			updatePendingMetadataByTokenHook: func(pending storepkg.PendingVerification) (bool, error) {
+				return false, errors.New("boom")
+			},
+			resolvePendingByTokenHook: func(chatID, userID int64, timestamp int64, randomToken string, action storepkg.PendingAction, maxWarnings int) (storepkg.PendingResolutionResult, error) {
+				actions = append(actions, action)
+				return storepkg.PendingResolutionResult{Matched: true}, nil
+			},
+		}, client)
+
+		incoming := &moderatedMessage{
+			message:     &gotgbot.Message{MessageId: 1001},
+			user:        &gotgbot.User{Id: 42},
+			chatID:      -100123,
+			maxWarnings: 3,
+		}
+		pending := storepkg.PendingVerification{
+			ChatID:      incoming.chatID,
+			UserID:      incoming.user.Id,
+			Timestamp:   1,
+			RandomToken: "token-a",
+		}
+		reminderMsg := &gotgbot.Message{MessageId: 5001, Chat: gotgbot.Chat{Id: incoming.chatID, Type: "supergroup"}}
+
+		if ok := b.persistVerificationReminder(b.Bot, incoming, pending, reminderMsg); ok {
+			t.Fatal("persistVerificationReminder() = true, want false on update failure")
+		}
+		if len(actions) != 1 || actions[0] != storepkg.PendingActionCancel {
+			t.Fatalf("cancel actions = %v, want [cancel]", actions)
+		}
+		if got := len(client.RequestsByMethod("deleteMessage")); got != 1 {
+			t.Fatalf("deleteMessage request count = %d, want 1", got)
+		}
+	})
+
+	t.Run("race deletes reminder without cancel", func(t *testing.T) {
+		t.Parallel()
+
+		base := mustNewSQLiteStore(t)
+		client := &recordingBotClient{}
+		var actions []storepkg.PendingAction
+		b := newTestBot(t, &hookedStore{
+			Store: base,
+			updatePendingMetadataByTokenHook: func(pending storepkg.PendingVerification) (bool, error) {
+				return false, nil
+			},
+			resolvePendingByTokenHook: func(chatID, userID int64, timestamp int64, randomToken string, action storepkg.PendingAction, maxWarnings int) (storepkg.PendingResolutionResult, error) {
+				actions = append(actions, action)
+				return storepkg.PendingResolutionResult{Matched: true}, nil
+			},
+		}, client)
+
+		incoming := &moderatedMessage{
+			message:     &gotgbot.Message{MessageId: 1001},
+			user:        &gotgbot.User{Id: 42},
+			chatID:      -100123,
+			maxWarnings: 3,
+		}
+		pending := storepkg.PendingVerification{
+			ChatID:      incoming.chatID,
+			UserID:      incoming.user.Id,
+			Timestamp:   1,
+			RandomToken: "token-a",
+		}
+		reminderMsg := &gotgbot.Message{MessageId: 5001, Chat: gotgbot.Chat{Id: incoming.chatID, Type: "supergroup"}}
+
+		if ok := b.persistVerificationReminder(b.Bot, incoming, pending, reminderMsg); ok {
+			t.Fatal("persistVerificationReminder() = true, want false on pending race")
+		}
+		if len(actions) != 0 {
+			t.Fatalf("cancel actions = %v, want none", actions)
+		}
+		if got := len(client.RequestsByMethod("deleteMessage")); got != 1 {
+			t.Fatalf("deleteMessage request count = %d, want 1", got)
+		}
+	})
+}
+
+func TestCancelPendingVerificationClearsStoredPending(t *testing.T) {
+	t.Parallel()
+
+	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	defer store.Close()
+
+	b := newModerationFlowBot(t, store)
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	if err := store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	b.cancelPendingVerification(pending, 3, "test")
+
+	gotPending, err := store.GetPending(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if gotPending != nil {
+		t.Fatalf("GetPending() = %+v, want nil after cancelPendingVerification", gotPending)
 	}
 }

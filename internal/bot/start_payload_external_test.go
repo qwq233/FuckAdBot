@@ -29,3 +29,25 @@ func TestVerificationStartURLContainsPayload(t *testing.T) {
 		t.Fatalf("BuildVerificationStartURL() = %q, want bot start deep link", url)
 	}
 }
+
+func TestParseVerificationStartPayloadRejectsInvalidPayload(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"bad",
+		"verify_only_two_parts",
+		"verify_nope_42_7001",
+		"verify_-100123_bad_7001",
+		"verify_-100123_42_bad",
+	}
+
+	for _, payload := range cases {
+		payload := payload
+		t.Run(payload, func(t *testing.T) {
+			t.Parallel()
+			if _, _, _, err := botpkg.ParseVerificationStartPayload(payload); err == nil {
+				t.Fatalf("ParseVerificationStartPayload(%q) error = nil, want error", payload)
+			}
+		})
+	}
+}

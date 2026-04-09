@@ -1,6 +1,7 @@
 package blacklist_test
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 
@@ -155,4 +156,75 @@ func TestBlacklistConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestLoadNormalizesDeduplicatesAndSortsGlobalWords(t *testing.T) {
+	t.Parallel()
+
+	bl := blacklist.New()
+	bl.Load([]string{"  Spam  ", "eggs", "spam", "", " EGGS "})
+
+	got := bl.List()
+	want := []string{"eggs", "spam"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("List() = %v, want %v", got, want)
+	}
+}
+
+func TestLoadGroupNormalizesDeduplicatesAndSortsWords(t *testing.T) {
+	t.Parallel()
+
+	bl := blacklist.New()
+	bl.LoadGroup(-100123, []string{"  GroupWord  ", "apple", "groupword", " APPLE "})
+
+	got := bl.ListGroup(-100123)
+	want := []string{"apple", "groupword"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListGroup() = %v, want %v", got, want)
+	}
+}
+
+func TestRemoveGroupDeletesEmptyGroupState(t *testing.T) {
+	t.Parallel()
+
+	bl := blacklist.New()
+	bl.AddGroup(-100123, "onlyword")
+
+	if removed := bl.RemoveGroup(-100123, "onlyword"); !removed {
+		t.Fatal("RemoveGroup() = false, want true")
+	}
+	if got := bl.ListGroup(-100123); got != nil {
+		t.Fatalf("ListGroup() = %v, want nil after removing final word", got)
+	}
+	if matched := bl.MatchWithGroup(-100123, "onlyword"); matched != "" {
+		t.Fatalf("MatchWithGroup() = %q, want empty after removing final group word", matched)
+	}
+}
+
+func TestRemoveGroupReturnsFalseForMissingChatOrWord(t *testing.T) {
+	t.Parallel()
+
+	bl := blacklist.New()
+	bl.AddGroup(-100123, "present")
+
+	if removed := bl.RemoveGroup(-200000, "present"); removed {
+		t.Fatal("RemoveGroup() = true, want false for missing chat")
+	}
+	if removed := bl.RemoveGroup(-100123, "missing"); removed {
+		t.Fatal("RemoveGroup() = true, want false for missing word")
+	}
+	if got := bl.ListGroup(-100123); !reflect.DeepEqual(got, []string{"present"}) {
+		t.Fatalf("ListGroup() = %v, want original group contents preserved", got)
+	}
+}
+
+func TestMatchReturnsDeterministicDirectMatchForOverlappingWords(t *testing.T) {
+	t.Parallel()
+
+	bl := blacklist.New()
+	bl.Load([]string{"he", "hers", "she"})
+
+	if matched := bl.Match("ushers"); matched != "she" {
+		t.Fatalf("Match() = %q, want %q for overlapping keywords", matched, "she")
+	}
 }

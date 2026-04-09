@@ -67,6 +67,27 @@ func TestParseModerationCallbackData(t *testing.T) {
 	}
 }
 
+func TestParseModerationCallbackDataRejectsInvalidData(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"bad",
+		"review:x:-100123:42",
+		"review:a:not-a-chat:42",
+		"review:a:-100123:not-a-user",
+	}
+
+	for _, data := range cases {
+		data := data
+		t.Run(data, func(t *testing.T) {
+			t.Parallel()
+			if _, _, _, err := botpkg.ParseModerationCallbackData(data); err == nil {
+				t.Fatalf("ParseModerationCallbackData(%q) error = nil, want error", data)
+			}
+		})
+	}
+}
+
 func TestBuildLanguagePreferenceKeyboardLayout(t *testing.T) {
 	t.Parallel()
 
@@ -99,5 +120,24 @@ func TestParseLanguagePreferenceCallbackData(t *testing.T) {
 
 	if language != "en" {
 		t.Fatalf("language = %q, want %q", language, "en")
+	}
+}
+
+func TestParseLanguagePreferenceCallbackDataRejectsInvalidData(t *testing.T) {
+	t.Parallel()
+
+	cases := []string{
+		"bad",
+		"lang:fr",
+	}
+
+	for _, data := range cases {
+		data := data
+		t.Run(data, func(t *testing.T) {
+			t.Parallel()
+			if _, err := botpkg.ParseLanguagePreferenceCallbackData(data); err == nil {
+				t.Fatalf("ParseLanguagePreferenceCallbackData(%q) error = nil, want error", data)
+			}
+		})
 	}
 }

@@ -195,6 +195,21 @@ func TestValidateVerificationRequestRejectsExpiredTimestamp(t *testing.T) {
 	}
 }
 
+func TestValidateVerificationRequestRejectsFutureTimestamp(t *testing.T) {
+	t.Parallel()
+
+	s := newTestServer("test-bot-token")
+	uid, cid := "42", "-100123"
+	futureTS := strconv.FormatInt(time.Now().Add(2*time.Minute).Unix(), 10)
+	rand := "abcdefg"
+	sig := s.sign(uid, cid, futureTS, rand)
+
+	_, _, err := s.validateVerificationRequest(uid, cid, futureTS, rand, sig)
+	if err == nil {
+		t.Fatal("validateVerificationRequest() error = nil, want error for future timestamp")
+	}
+}
+
 func TestValidateVerificationRequestRejectsWhenNoPendingRecord(t *testing.T) {
 	t.Parallel()
 
@@ -208,6 +223,37 @@ func TestValidateVerificationRequestRejectsWhenNoPendingRecord(t *testing.T) {
 	_, _, err := s.validateVerificationRequest(uid, cid, ts, rand, sig)
 	if err == nil {
 		t.Fatal("validateVerificationRequest() error = nil, want error when no pending record exists")
+	}
+}
+
+func TestValidateVerificationRequestRejectsInvalidIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	s := newTestServer("test-bot-token")
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+
+	cases := []struct {
+		name      string
+		uid       string
+		cid       string
+		timestamp string
+	}{
+		{name: "invalid uid", uid: "not-a-user", cid: "-100123", timestamp: now},
+		{name: "invalid cid", uid: "42", cid: "not-a-chat", timestamp: now},
+		{name: "invalid timestamp", uid: "42", cid: "-100123", timestamp: "not-a-timestamp"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rand := "abcdefg"
+			sig := s.sign(tc.uid, tc.cid, tc.timestamp, rand)
+			if _, _, err := s.validateVerificationRequest(tc.uid, tc.cid, tc.timestamp, rand, sig); err == nil {
+				t.Fatalf("validateVerificationRequest(%q, %q, %q, ...) error = nil, want error", tc.uid, tc.cid, tc.timestamp)
+			}
+		})
 	}
 }
 
@@ -298,6 +344,46 @@ func TestValidateVerificationRequestRejectsTokenMismatch(t *testing.T) {
 	_, _, err := s.validateVerificationRequest(uidStr, cidStr, tsStr, rand, sig)
 	if err == nil {
 		t.Fatal("validateVerificationRequest() error = nil, want error for random-token mismatch")
+	}
+}
+
+func TestValidateVerificationRequestRejectsExpiredPendingEvenWhenSignatureMatches(t *testing.T) {
+	t.Parallel()
+
+	const (
+		chatID int64 = -100123
+		userID int64 = 42
+	)
+
+	ts := time.Now().Unix()
+	rand := "abcdefg"
+
+	stub := &stubStore{
+		pendingFn: func(_, _ int64) (*store.PendingVerification, error) {
+			return &store.PendingVerification{
+				ChatID:      chatID,
+				UserID:      userID,
+				Timestamp:   ts,
+				RandomToken: rand,
+				ExpireAt:    time.Now().UTC().Add(-time.Second),
+			}, nil
+		},
+	}
+
+	s := &Server{
+		cfg:          &config.TurnstileConfig{Domain: "example.com"},
+		botToken:     "test-bot-token",
+		verifyWindow: 5 * time.Minute,
+		store:        stub,
+	}
+
+	uidStr := strconv.FormatInt(userID, 10)
+	cidStr := strconv.FormatInt(chatID, 10)
+	tsStr := strconv.FormatInt(ts, 10)
+	sig := s.sign(uidStr, cidStr, tsStr, rand)
+
+	if _, _, err := s.validateVerificationRequest(uidStr, cidStr, tsStr, rand, sig); err == nil {
+		t.Fatal("validateVerificationRequest() error = nil, want pending-expired error")
 	}
 }
 
