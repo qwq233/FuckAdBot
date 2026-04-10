@@ -31,6 +31,9 @@ type Server struct {
 	onVerify     func(token VerifiedToken) // callback when user passes verification
 	httpServer   *http.Server
 	httpClient   *http.Client
+	listen       func(network, address string) (net.Listener, error)
+	serve        func(server *http.Server, listener net.Listener) error
+	serveErrors  chan error
 }
 
 type VerifiedToken struct {
@@ -54,6 +57,9 @@ func NewServer(cfg *config.TurnstileConfig, st store.Store, verifyWindow time.Du
 		httpClient: &http.Client{
 			Timeout: turnstileVerifyRequestTimeout,
 		},
+		listen:      net.Listen,
+		serve:       func(server *http.Server, listener net.Listener) error { return server.Serve(listener) },
+		serveErrors: make(chan error, 1),
 	}
 }
 
@@ -61,22 +67,38 @@ func (s *Server) Start() error {
 	if s.httpServer != nil {
 		return fmt.Errorf("captcha server already started")
 	}
+	if s.listen == nil {
+		s.listen = net.Listen
+	}
+	if s.serve == nil {
+		s.serve = func(server *http.Server, listener net.Listener) error {
+			return server.Serve(listener)
+		}
+	}
+	if s.serveErrors == nil {
+		s.serveErrors = make(chan error, 1)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(config.VerifyPath, s.handleVerifyPage)
 	mux.HandleFunc(config.CallbackPath, s.handleCallback)
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.ListenAddr, s.cfg.ListenPort)
-	listener, err := net.Listen("tcp", addr)
+	listener, err := s.listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 
-	s.httpServer = &http.Server{Addr: addr, Handler: mux}
+	s.httpServer = &http.Server{Addr: listener.Addr().String(), Handler: mux}
 	log.Printf("[captcha] HTTP server listening on %s", listener.Addr().String())
 	go func() {
-		if err := s.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("[captcha] HTTP server stopped unexpectedly: %v", err)
+		if err := s.serve(s.httpServer, listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			wrappedErr := fmt.Errorf("captcha server serve: %w", err)
+			log.Printf("[captcha] HTTP server stopped unexpectedly: %v", wrappedErr)
+			select {
+			case s.serveErrors <- wrappedErr:
+			default:
+			}
 		}
 	}()
 
@@ -89,6 +111,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	return s.httpServer.Shutdown(ctx)
+}
+
+func (s *Server) Errors() <-chan error {
+	if s.serveErrors == nil {
+		s.serveErrors = make(chan error, 1)
+	}
+	return s.serveErrors
 }
 
 // GenerateVerifyURL creates a signed verification URL.

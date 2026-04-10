@@ -46,5 +46,5 @@ func (b *Bot) HandleVerificationSuccess(token captcha.VerifiedToken) {
 		return
 	}
 
-	scheduleMessageDeletion(b.Bot, token.UserID, successMsg.MessageId, manualModerationResultTTL, "verification success private")
+	b.scheduleMessageDeletion(b.Bot, token.UserID, successMsg.MessageId, manualModerationResultTTL, "verification success private")
 }

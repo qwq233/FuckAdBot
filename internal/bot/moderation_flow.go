@@ -320,7 +320,7 @@ func (b *Bot) activateVerificationReminder(bot *gotgbot.Bot, incoming *moderated
 	}, "verification reminder")
 
 	reminderTTL := b.Config.Moderation.GetReminderTTL()
-	scheduleMessageDeletion(bot, incoming.chatID, reminderMsg.MessageId, reminderTTL, "verification reminder")
+	b.scheduleMessageDeletion(bot, incoming.chatID, reminderMsg.MessageId, reminderTTL, "verification reminder")
 	b.scheduleOriginalMessageDeletion(bot, pending)
 	b.scheduleUserTimer(incoming.chatID, incoming.user.Id, pending.ExpireAt.Sub(time.Now().UTC()), func() {
 		b.onVerifyWindowExpired(bot, pending)

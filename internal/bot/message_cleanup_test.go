@@ -12,12 +12,15 @@ func TestScheduleMessageDeletionSkipsInvalidInputs(t *testing.T) {
 	t.Parallel()
 
 	client := &recordingBotClient{}
-	bot := newRecordingTelegramBot(client)
+	telegramBot := newRecordingTelegramBot(client)
+	owner := newTestBot(t, nil, client)
 
-	scheduleMessageDeletion(nil, 42, 99, 10*time.Millisecond, "nil bot")
-	scheduleMessageDeletion(bot, 0, 99, 10*time.Millisecond, "zero chat")
-	scheduleMessageDeletion(bot, 42, 0, 10*time.Millisecond, "zero message")
-	scheduleMessageDeletion(bot, 42, 99, 0, "zero delay")
+	var nilOwner *Bot
+	nilOwner.scheduleMessageDeletion(telegramBot, 42, 99, 10*time.Millisecond, "nil owner")
+	owner.scheduleMessageDeletion(nil, 42, 99, 10*time.Millisecond, "nil bot")
+	owner.scheduleMessageDeletion(telegramBot, 0, 99, 10*time.Millisecond, "zero chat")
+	owner.scheduleMessageDeletion(telegramBot, 42, 0, 10*time.Millisecond, "zero message")
+	owner.scheduleMessageDeletion(telegramBot, 42, 99, 0, "zero delay")
 
 	time.Sleep(40 * time.Millisecond)
 	if got := len(client.Requests()); got != 0 {
@@ -29,9 +32,10 @@ func TestScheduleMessageDeletionDeletesMessageAfterDelay(t *testing.T) {
 	t.Parallel()
 
 	client := &recordingBotClient{}
-	bot := newRecordingTelegramBot(client)
+	telegramBot := newRecordingTelegramBot(client)
+	owner := newTestBot(t, nil, client)
 
-	scheduleMessageDeletion(bot, 42, 99, 10*time.Millisecond, "cleanup")
+	owner.scheduleMessageDeletion(telegramBot, 42, 99, 10*time.Millisecond, "cleanup")
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -49,6 +53,22 @@ func TestScheduleMessageDeletionDeletesMessageAfterDelay(t *testing.T) {
 	}
 
 	t.Fatal("deleteMessage request was not observed before timeout")
+}
+
+func TestStopAllBackgroundTasksCancelsScheduledMessageDeletion(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingBotClient{}
+	telegramBot := newRecordingTelegramBot(client)
+	owner := newTestBot(t, nil, client)
+
+	owner.scheduleMessageDeletion(telegramBot, 42, 99, 40*time.Millisecond, "cleanup")
+	owner.stopAllBackgroundTasks()
+
+	time.Sleep(80 * time.Millisecond)
+	if got := len(client.RequestsByMethod("deleteMessage")); got != 0 {
+		t.Fatalf("deleteMessage request count = %d, want 0 after shutdown", got)
+	}
 }
 
 func TestDeleteMessageIfExistsIgnoresKnownMissingMessageError(t *testing.T) {

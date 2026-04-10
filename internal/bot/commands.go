@@ -329,7 +329,7 @@ func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 		log.Printf("[bot] send approve confirmation error: %v", err)
 		return nil
 	}
-	scheduleMessageDeletion(bot, chatID, resp.MessageId, manualModerationResultTTL, "approve confirmation")
+	b.scheduleMessageDeletion(bot, chatID, resp.MessageId, manualModerationResultTTL, "approve confirmation")
 
 	return nil
 }
@@ -409,7 +409,7 @@ func (b *Bot) cmdReject(bot *gotgbot.Bot, ctx *ext.Context) error {
 		log.Printf("[bot] send reject confirmation error: %v", err)
 		return nil
 	}
-	scheduleMessageDeletion(bot, chatID, resp.MessageId, manualModerationResultTTL, "reject confirmation")
+	b.scheduleMessageDeletion(bot, chatID, resp.MessageId, manualModerationResultTTL, "reject confirmation")
 
 	return nil
 }

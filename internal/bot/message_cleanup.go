@@ -10,12 +10,12 @@ import (
 
 const manualModerationResultTTL = 15 * time.Second
 
-func scheduleMessageDeletion(bot *gotgbot.Bot, chatID, messageID int64, delay time.Duration, label string) {
-	if bot == nil || chatID == 0 || messageID == 0 || delay <= 0 {
+func (b *Bot) scheduleMessageDeletion(bot *gotgbot.Bot, chatID, messageID int64, delay time.Duration, label string) {
+	if b == nil || bot == nil || chatID == 0 || messageID == 0 || delay <= 0 {
 		return
 	}
 
-	time.AfterFunc(delay, func() {
+	b.scheduleBackgroundTimer(delay, func() {
 		deleteMessageIfExists(bot, chatID, messageID, label)
 	})
 }

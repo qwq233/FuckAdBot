@@ -166,7 +166,7 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 				InlineKeyboard: [][]gotgbot.InlineKeyboardButton{},
 			},
 		}, "manual moderation result") {
-			scheduleMessageDeletion(bot, cq.Message.GetChat().Id, cq.Message.GetMessageId(), manualModerationResultTTL, "manual moderation result")
+			b.scheduleMessageDeletion(bot, cq.Message.GetChat().Id, cq.Message.GetMessageId(), manualModerationResultTTL, "manual moderation result")
 		}
 	}
 

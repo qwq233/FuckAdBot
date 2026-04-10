@@ -1,7 +1,6 @@
 package bot
 
 import (
-	"context"
 	"log"
 	"sync"
 	"time"
@@ -111,23 +110,6 @@ func (b *Bot) cachedUserChat(userID int64, fetch func(int64) (*gotgbot.ChatFullI
 }
 
 const cacheCleanupInterval = 5 * time.Minute
-
-// startCleanup launches a background goroutine that periodically removes
-// expired entries from both cache maps. It stops when ctx is cancelled.
-func (c *botCache) startCleanup(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(cacheCleanupInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case now := <-ticker.C:
-				c.evictExpired(now)
-			}
-		}
-	}()
-}
 
 func (c *botCache) evictExpired(now time.Time) {
 	c.mu.Lock()

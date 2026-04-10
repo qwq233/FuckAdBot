@@ -14,7 +14,6 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/message"
 
 	"github.com/qwq233/fuckadbot/internal/blacklist"
-	"github.com/qwq233/fuckadbot/internal/captcha"
 	"github.com/qwq233/fuckadbot/internal/config"
 	"github.com/qwq233/fuckadbot/internal/store"
 )
@@ -28,35 +27,44 @@ type Bot struct {
 	Config    *config.Config
 	Store     store.Store
 	Blacklist *blacklist.Blacklist
-	Captcha   *captcha.Server
+	Captcha   VerificationURLProvider
 
-	cache    botCache
-	timersMu sync.Mutex
-	timers   map[timerKey][]*time.Timer
+	cache            botCache
+	timersMu         sync.Mutex
+	timers           map[timerKey][]*time.Timer
+	backgroundTimers map[*time.Timer]struct{}
+	shutdownStops    []func()
+	newUpdater       updaterFactory
 }
 
-func New(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs *captcha.Server) (*Bot, error) {
-	b, err := gotgbot.NewBot(cfg.Bot.Token, nil)
+func New(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs VerificationURLProvider) (*Bot, error) {
+	return newWithTelegramFactory(cfg, st, bl, cs, gotgbot.NewBot)
+}
+
+func newWithTelegramFactory(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs VerificationURLProvider, newTelegramBot func(token string, opts *gotgbot.BotOpts) (*gotgbot.Bot, error)) (*Bot, error) {
+	b, err := newTelegramBot(cfg.Bot.Token, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	log.Printf("[bot] Authorized as @%s (ID: %d)", b.Username, b.Id)
 
-	return &Bot{
+	botInstance := &Bot{
 		Bot:       b,
 		Config:    cfg,
 		Store:     st,
 		Blacklist: bl,
 		Captcha:   cs,
-		timers:    make(map[timerKey][]*time.Timer),
-	}, nil
+	}
+	botInstance.ensureRuntimeState()
+	return botInstance, nil
 }
 
 // trackUserTimer registers a timer so it can be cancelled via cancelUserTimers.
 func (b *Bot) trackUserTimer(chatID, userID int64, t *time.Timer) {
 	b.timersMu.Lock()
 	defer b.timersMu.Unlock()
+	b.ensureRuntimeState()
 	key := timerKey{chatID, userID}
 	b.timers[key] = append(b.timers[key], t)
 }
@@ -64,6 +72,9 @@ func (b *Bot) trackUserTimer(chatID, userID int64, t *time.Timer) {
 func (b *Bot) removeTrackedTimer(chatID, userID int64, target *time.Timer) {
 	b.timersMu.Lock()
 	defer b.timersMu.Unlock()
+	if b.timers == nil {
+		return
+	}
 
 	key := timerKey{chatID, userID}
 	timers := b.timers[key]
@@ -91,6 +102,9 @@ func (b *Bot) removeTrackedTimer(chatID, userID int64, target *time.Timer) {
 func (b *Bot) cancelUserTimers(chatID, userID int64) {
 	b.timersMu.Lock()
 	defer b.timersMu.Unlock()
+	if b.timers == nil {
+		return
+	}
 	key := timerKey{chatID, userID}
 	for _, t := range b.timers[key] {
 		t.Stop()
@@ -101,6 +115,9 @@ func (b *Bot) cancelUserTimers(chatID, userID int64) {
 func (b *Bot) cancelAllTimersForUser(userID int64) {
 	b.timersMu.Lock()
 	defer b.timersMu.Unlock()
+	if b.timers == nil {
+		return
+	}
 
 	for key, timers := range b.timers {
 		if key.userID != userID {
@@ -114,6 +131,10 @@ func (b *Bot) cancelAllTimersForUser(userID int64) {
 }
 
 func (b *Bot) scheduleUserTimer(chatID, userID int64, delay time.Duration, fn func()) *time.Timer {
+	if b == nil || delay <= 0 || fn == nil {
+		return nil
+	}
+
 	trackedTimer := make(chan *time.Timer, 1)
 	timer := time.AfterFunc(delay, func() {
 		timer := <-trackedTimer
@@ -125,7 +146,17 @@ func (b *Bot) scheduleUserTimer(chatID, userID int64, delay time.Duration, fn fu
 	return timer
 }
 
-func (b *Bot) Start(ctx context.Context) error {
+func (b *Bot) Start(ctx context.Context) (err error) {
+	b.ensureRuntimeState()
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer func() {
+		if err != nil {
+			cancelRun()
+			b.stopAllBackgroundTasks()
+		}
+	}()
+
 	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
 		Error: func(_ *gotgbot.Bot, _ *ext.Context, err error) ext.DispatcherAction {
 			log.Printf("[bot] handler error: %v", err)
@@ -135,7 +166,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	})
 
 	updaterErrors := newUpdaterErrorThrottler()
-	updater := ext.NewUpdater(dispatcher, &ext.UpdaterOpts{
+	updater := b.newUpdater(dispatcher, &ext.UpdaterOpts{
 		UnhandledErrFunc: updaterErrors.Handle,
 	})
 
@@ -161,7 +192,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	}
 
 	log.Printf("[bot] Starting polling...")
-	err := updater.StartPolling(b.Bot, &ext.PollingOpts{
+	err = updater.StartPolling(b.Bot, &ext.PollingOpts{
 		GetUpdatesOpts: &gotgbot.GetUpdatesOpts{
 			Timeout: pollingGetUpdatesTimeoutSeconds,
 			RequestOpts: &gotgbot.RequestOpts{
@@ -174,16 +205,27 @@ func (b *Bot) Start(ctx context.Context) error {
 		return err
 	}
 
-	b.cache.startCleanup(ctx)
+	b.registerShutdownStop(b.cache.startCleanup(runCtx))
 
 	log.Printf("[bot] Bot is running. Press Ctrl+C to stop.")
+	var stopUpdaterOnce sync.Once
+	stopUpdater := func() {
+		stopUpdaterOnce.Do(func() {
+			if stopErr := updater.Stop(); stopErr != nil {
+				log.Printf("[bot] updater.Stop error: %v", stopErr)
+			}
+		})
+	}
 	go func() {
 		<-ctx.Done()
 		log.Printf("[bot] Shutting down...")
-		if err := updater.Stop(); err != nil {
-			log.Printf("[bot] updater.Stop error: %v", err)
-		}
+		cancelRun()
+		stopUpdater()
+		b.stopAllBackgroundTasks()
 	}()
 	updater.Idle()
+	cancelRun()
+	stopUpdater()
+	b.stopAllBackgroundTasks()
 	return nil
 }

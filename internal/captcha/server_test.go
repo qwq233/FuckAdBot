@@ -29,12 +29,7 @@ func newTestServer(token string) *Server {
 		ListenPort:    0,
 		VerifyTimeout: "5m",
 	}
-	return &Server{
-		cfg:          cfg,
-		botToken:     token,
-		verifyWindow: 5 * time.Minute,
-		store:        &stubStore{},
-	}
+	return NewServer(cfg, &stubStore{}, 5*time.Minute, token, nil)
 }
 
 // stubStore satisfies store.Store with no-op implementations.
@@ -405,6 +400,68 @@ func TestStartFailsFastWhenPortIsOccupied(t *testing.T) {
 
 	if err := server.Start(); err == nil {
 		t.Fatal("Start() error = nil, want bind failure when port is occupied")
+	}
+}
+
+func TestStartAndShutdownServeLifecycle(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(&config.TurnstileConfig{
+		Domain:     "example.com",
+		ListenAddr: "127.0.0.1",
+		ListenPort: 0,
+	}, &stubStore{}, 5*time.Minute, "token", nil)
+
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	resp, err := http.Get("http://" + server.httpServer.Addr + config.VerifyPath)
+	if err != nil {
+		t.Fatalf("http.Get() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET %s status = %d, want %d", config.VerifyPath, resp.StatusCode, http.StatusBadRequest)
+	}
+
+	select {
+	case err := <-server.Errors():
+		t.Fatalf("Errors() yielded %v during healthy lifecycle", err)
+	default:
+	}
+
+	if err := server.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+}
+
+func TestErrorsReportsUnexpectedServeFailure(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer(&config.TurnstileConfig{
+		Domain:     "example.com",
+		ListenAddr: "127.0.0.1",
+		ListenPort: 0,
+	}, &stubStore{}, 5*time.Minute, "token", nil)
+
+	server.serve = func(_ *http.Server, listener net.Listener) error {
+		defer listener.Close()
+		return context.DeadlineExceeded
+	}
+
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	select {
+	case err := <-server.Errors():
+		if err == nil {
+			t.Fatal("Errors() returned nil, want serve failure")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Errors() did not report unexpected serve failure")
 	}
 }
 
