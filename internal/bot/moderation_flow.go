@@ -112,47 +112,31 @@ func (b *Bot) handleRejectedUser(bot *gotgbot.Bot, incoming *moderatedMessage) b
 
 func (b *Bot) handleVerificationRequiredMessage(bot *gotgbot.Bot, incoming *moderatedMessage) {
 	for attempt := 0; attempt < verificationReservationAttempts; attempt++ {
-		warnCount, ok := b.warningCountBeforeVerification(bot, incoming)
-		if !ok {
-			return
-		}
-
 		pending, err := buildPendingVerification(incoming)
 		if err != nil {
 			log.Printf("[bot] generate verification random token error: %v", err)
 			return
 		}
 
-		created, existing, err := b.Store.CreatePendingIfAbsent(pending)
+		reservation, err := b.Store.ReserveVerificationWindow(pending, incoming.maxWarnings)
 		if err != nil {
-			log.Printf("[bot] store.CreatePendingIfAbsent error: %v", err)
+			log.Printf("[bot] store.ReserveVerificationWindow error: %v", err)
+			return
+		}
+		if reservation.LimitExceeded {
+			log.Printf("[bot] banning user=%d in chat=%d: exceeded max warnings (%d)", incoming.user.Id, incoming.chatID, incoming.maxWarnings)
+			deleteMessageIfExists(bot, incoming.chatID, incoming.message.MessageId, "unverified message before ban")
+			banChatMember(bot, incoming.chatID, incoming.user.Id, "warning limit exceeded")
 			return
 		}
 
-		if outcome := b.handlePendingReservation(bot, incoming, pending, created, existing, warnCount); outcome == pendingReservationRetry {
+		if outcome := b.handlePendingReservation(bot, incoming, pending, reservation.Created, reservation.Existing, reservation.WarningCount); outcome == pendingReservationRetry {
 			continue
 		}
 		return
 	}
 
 	log.Printf("[bot] failed to reserve verification window after retries: chat=%d user=%d", incoming.chatID, incoming.user.Id)
-}
-
-func (b *Bot) warningCountBeforeVerification(bot *gotgbot.Bot, incoming *moderatedMessage) (int, bool) {
-	warnCount, err := b.Store.GetWarningCount(incoming.chatID, incoming.user.Id)
-	if err != nil {
-		log.Printf("[bot] store.GetWarningCount error: %v", err)
-		return 0, false
-	}
-
-	if warnCount >= incoming.maxWarnings {
-		log.Printf("[bot] banning user=%d in chat=%d: exceeded max warnings (%d)", incoming.user.Id, incoming.chatID, incoming.maxWarnings)
-		deleteMessageIfExists(bot, incoming.chatID, incoming.message.MessageId, "unverified message before ban")
-		banChatMember(bot, incoming.chatID, incoming.user.Id, "warning limit exceeded")
-		return 0, false
-	}
-
-	return warnCount, true
 }
 
 func buildPendingVerification(incoming *moderatedMessage) (store.PendingVerification, error) {
@@ -321,10 +305,6 @@ func (b *Bot) activateVerificationReminder(bot *gotgbot.Bot, incoming *moderated
 
 	reminderTTL := b.Config.Moderation.GetReminderTTL()
 	b.scheduleMessageDeletion(bot, incoming.chatID, reminderMsg.MessageId, reminderTTL, "verification reminder")
-	b.scheduleOriginalMessageDeletion(bot, pending)
-	b.scheduleUserTimer(incoming.chatID, incoming.user.Id, pending.ExpireAt.Sub(time.Now().UTC()), func() {
-		b.onVerifyWindowExpired(bot, pending)
-	})
 }
 
 func (b *Bot) cancelPendingVerification(pending store.PendingVerification, maxWarnings int, reason string) {

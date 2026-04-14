@@ -16,6 +16,8 @@ type moderationFlowStoreStub struct {
 	verifiedErr error
 	rejected    bool
 	rejectedErr error
+	reserve     storepkg.VerificationReservationResult
+	reserveErr  error
 	resolve     storepkg.PendingResolutionResult
 	resolveErr  error
 }
@@ -48,6 +50,9 @@ func (s *moderationFlowStoreStub) ListPendingVerifications() ([]storepkg.Pending
 }
 func (s *moderationFlowStoreStub) CreatePendingIfAbsent(pending storepkg.PendingVerification) (bool, *storepkg.PendingVerification, error) {
 	return false, nil, nil
+}
+func (s *moderationFlowStoreStub) ReserveVerificationWindow(pending storepkg.PendingVerification, maxWarnings int) (storepkg.VerificationReservationResult, error) {
+	return s.reserve, s.reserveErr
 }
 func (s *moderationFlowStoreStub) SetPending(pending storepkg.PendingVerification) error {
 	return nil

@@ -1,0 +1,10 @@
+[redis]
+# When this file is absent, benchmarks and loadtest continue to use miniredis.
+enabled = true
+addr = "172.31.8.245:6379"
+password = ""
+db = 0
+# Used as the base prefix. Benchmarks/loadtest append their own scoped suffixes.
+key_prefix = "fuckad:testing:"
+# Remove keys for the generated scoped prefix before/after each run.
+cleanup = true

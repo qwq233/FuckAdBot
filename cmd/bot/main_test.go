@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/qwq233/fuckadbot/internal/blacklist"
 	botpkg "github.com/qwq233/fuckadbot/internal/bot"
 	"github.com/qwq233/fuckadbot/internal/captcha"
@@ -163,7 +164,6 @@ func writeConfigFile(t *testing.T, enableTurnstile bool) string {
 
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.toml")
-	dbPath := filepath.Join(tempDir, "test.db")
 
 	content := `[bot]
 token = "123:test-token"
@@ -189,7 +189,7 @@ verify_window = "5m"
 
 [store]
 type = "sqlite"
-sqlite_path = "` + filepath.ToSlash(dbPath) + `"
+data_path = "` + filepath.ToSlash(tempDir) + `"
 `
 
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
@@ -212,4 +212,62 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestNewStoreFromConfigSupportsAllConfiguredModes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sqlite", func(t *testing.T) {
+		t.Parallel()
+
+		st, err := newStoreFromConfig(&config.Config{
+			Store: config.StoreConfig{
+				Type:     "sqlite",
+				DataPath: t.TempDir(),
+			},
+		})
+		if err != nil {
+			t.Fatalf("newStoreFromConfig(sqlite) error = %v", err)
+		}
+		defer st.Close()
+	})
+
+	t.Run("redis", func(t *testing.T) {
+		t.Parallel()
+
+		redisSrv := miniredis.RunT(t)
+		st, err := newStoreFromConfig(&config.Config{
+			Store: config.StoreConfig{
+				Type:      "redis",
+				DataPath:  t.TempDir(),
+				RedisAddr: redisSrv.Addr(),
+			},
+		})
+		if err != nil {
+			t.Fatalf("newStoreFromConfig(redis) error = %v", err)
+		}
+		defer st.Close()
+	})
+
+	t.Run("dual write", func(t *testing.T) {
+		t.Parallel()
+
+		redisSrv := miniredis.RunT(t)
+		st, err := newStoreFromConfig(&config.Config{
+			Store: config.StoreConfig{
+				Type:                            "sqlite",
+				DataPath:                        t.TempDir(),
+				RedisAddr:                       redisSrv.Addr(),
+				DualWriteEnabled:                true,
+				DualWriteFlushInterval:          "1s",
+				DualWriteBatchSize:              10,
+				DualWriteMaxConsecutiveFailures: 5,
+				DualWriteMaxQueueDepth:          100,
+			},
+		})
+		if err != nil {
+			t.Fatalf("newStoreFromConfig(dual write) error = %v", err)
+		}
+		defer st.Close()
+	})
 }

@@ -26,6 +26,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, serverMaxFormBytes)
 	if err := parseVerificationRequest(r); err != nil {
 		writeJSON(w, false, "Invalid form data")
 		return
@@ -53,13 +54,21 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	ok, err := s.verifyTurnstile(r.Context(), cfToken, extractClientIP(r))
 	if err != nil {
 		logTurnstileVerifyError(err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.recordTimeout()
+		} else {
+			s.recordFailure()
+		}
 		writeJSON(w, false, "验证服务异常，请稍后重试")
 		return
 	}
 	if !ok {
+		s.recordFailure()
 		writeJSON(w, false, "人机验证未通过，请重试")
 		return
 	}
+
+	s.recordSuccess()
 
 	if s.onVerify != nil {
 		s.onVerify(VerifiedToken{

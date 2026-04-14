@@ -16,37 +16,30 @@ func (fn rowScannerFunc) Scan(dest ...any) error {
 	return fn(dest...)
 }
 
-func TestParseSQLiteTimeSupportsCommonLayouts(t *testing.T) {
+func TestPendingExpireAtUnixUsesUTCSeconds(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now().UTC().Truncate(time.Second)
-	cases := []string{
-		now.Format(time.DateTime),
-		now.Format(time.RFC3339),
-		now.Format(time.RFC3339Nano),
+	expireAt := time.Date(2026, time.April, 13, 2, 30, 45, 987654321, time.FixedZone("UTC+8", 8*60*60))
+	pending := PendingVerification{
+		ExpireAt: expireAt,
 	}
-
-	for _, input := range cases {
-		input := input
-		t.Run(input, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := parseSQLiteTime(input)
-			if err != nil {
-				t.Fatalf("parseSQLiteTime(%q) error = %v", input, err)
-			}
-			if !got.Equal(now) {
-				t.Fatalf("parseSQLiteTime(%q) = %v, want %v", input, got, now)
-			}
-		})
+	if got, want := pendingExpireAtUnix(pending), expireAt.UTC().Unix(); got != want {
+		t.Fatalf("pendingExpireAtUnix() = %d, want %d", got, want)
 	}
 }
 
-func TestParseSQLiteTimeRejectsUnknownFormat(t *testing.T) {
+func TestSQLiteDataSourceNameEnablesWalAndNormalSynchronous(t *testing.T) {
 	t.Parallel()
 
-	if _, err := parseSQLiteTime("2026/04/08 12:00:00"); err == nil {
-		t.Fatal("parseSQLiteTime() error = nil, want unsupported format error")
+	got := sqliteDataSourceName(filepath.Join("data", "bench.db"))
+	for _, want := range []string{
+		"_pragma=journal_mode(wal)",
+		"_pragma=busy_timeout(5000)",
+		"_pragma=synchronous(normal)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sqliteDataSourceName() = %q, want substring %q", got, want)
+		}
 	}
 }
 
@@ -74,7 +67,7 @@ func TestScanPendingDefaultsBlankLanguage(t *testing.T) {
 		*(dest[2].(*string)) = ""
 		*(dest[3].(*int64)) = 1712300000
 		*(dest[4].(*string)) = "token-a"
-		*(dest[5].(*string)) = expireAt.Format(time.RFC3339)
+		*(dest[5].(*int64)) = expireAt.Unix()
 		*(dest[6].(*int64)) = 1
 		*(dest[7].(*int64)) = 2
 		*(dest[8].(*int64)) = 3
@@ -111,23 +104,168 @@ func TestScanPendingPropagatesScanError(t *testing.T) {
 	}
 }
 
-func TestScanPendingRejectsInvalidExpireAt(t *testing.T) {
+func TestMigratePendingExpireAtToUnixConvertsLegacyTextColumn(t *testing.T) {
 	t.Parallel()
 
-	pending, err := scanPending(rowScannerFunc(func(dest ...any) error {
-		*(dest[0].(*int64)) = -100123
-		*(dest[1].(*int64)) = 42
-		*(dest[2].(*string)) = "en"
-		*(dest[3].(*int64)) = 1712300000
-		*(dest[4].(*string)) = "token-a"
-		*(dest[5].(*string)) = "not-a-time"
-		return nil
-	}))
-	if err == nil {
-		t.Fatal("scanPending() error = nil, want invalid expire_at error")
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
 	}
-	if pending != nil {
-		t.Fatalf("scanPending() = %+v, want nil on invalid expire_at", pending)
+	defer rawDB.Close()
+
+	expireAt := time.Now().UTC().Truncate(time.Second)
+	if _, err := rawDB.Exec(`CREATE TABLE pending_verifications (
+		chat_id INTEGER NOT NULL,
+		user_id INTEGER NOT NULL,
+		user_language TEXT NOT NULL DEFAULT 'zh-cn',
+		token_timestamp INTEGER NOT NULL DEFAULT 0,
+		token_rand TEXT NOT NULL DEFAULT '',
+		expire_at DATETIME NOT NULL,
+		reminder_message_id INTEGER NOT NULL DEFAULT 0,
+		private_message_id INTEGER NOT NULL DEFAULT 0,
+		original_message_id INTEGER NOT NULL DEFAULT 0,
+		message_thread_id INTEGER NOT NULL DEFAULT 0,
+		reply_to_message_id INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (chat_id, user_id)
+	)`); err != nil {
+		t.Fatalf("create legacy pending_verifications error = %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO pending_verifications (`+pendingVerificationColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		-100123, 42, "en", int64(1712300000), "token-a", expireAt.Format(time.DateTime), int64(1), int64(2), int64(3), int64(4), int64(5),
+	); err != nil {
+		t.Fatalf("seed legacy pending_verifications row error = %v", err)
+	}
+
+	s := &SQLiteStore{db: rawDB}
+	if err := s.migratePendingExpireAtToUnix(); err != nil {
+		t.Fatalf("migratePendingExpireAtToUnix() error = %v", err)
+	}
+
+	var gotExpireAt int64
+	if err := rawDB.QueryRow(
+		`SELECT expire_at FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
+		-100123, 42,
+	).Scan(&gotExpireAt); err != nil {
+		t.Fatalf("read migrated expire_at error = %v", err)
+	}
+	if gotExpireAt != expireAt.Unix() {
+		t.Fatalf("migrated expire_at = %d, want %d", gotExpireAt, expireAt.Unix())
+	}
+}
+
+func TestMigratePendingExpireAtToUnixPreservesLegacyIntegerStorage(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer rawDB.Close()
+
+	expireAtUnix := time.Now().UTC().Truncate(time.Second).Unix()
+	if _, err := rawDB.Exec(`CREATE TABLE pending_verifications (
+		chat_id INTEGER NOT NULL,
+		user_id INTEGER NOT NULL,
+		user_language TEXT NOT NULL DEFAULT 'zh-cn',
+		token_timestamp INTEGER NOT NULL DEFAULT 0,
+		token_rand TEXT NOT NULL DEFAULT '',
+		expire_at DATETIME NOT NULL,
+		reminder_message_id INTEGER NOT NULL DEFAULT 0,
+		private_message_id INTEGER NOT NULL DEFAULT 0,
+		original_message_id INTEGER NOT NULL DEFAULT 0,
+		message_thread_id INTEGER NOT NULL DEFAULT 0,
+		reply_to_message_id INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (chat_id, user_id)
+	)`); err != nil {
+		t.Fatalf("create legacy pending_verifications error = %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO pending_verifications (`+pendingVerificationColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		-100123, 42, "en", int64(1712300000), "token-a", expireAtUnix, int64(1), int64(2), int64(3), int64(4), int64(5),
+	); err != nil {
+		t.Fatalf("seed legacy integer pending_verifications row error = %v", err)
+	}
+
+	s := &SQLiteStore{db: rawDB}
+	if err := s.migratePendingExpireAtToUnix(); err != nil {
+		t.Fatalf("migratePendingExpireAtToUnix() error = %v", err)
+	}
+
+	var (
+		gotExpireAt int64
+		storageType string
+	)
+	if err := rawDB.QueryRow(
+		`SELECT expire_at, typeof(expire_at) FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
+		-100123, 42,
+	).Scan(&gotExpireAt, &storageType); err != nil {
+		t.Fatalf("read migrated integer expire_at error = %v", err)
+	}
+	if gotExpireAt != expireAtUnix {
+		t.Fatalf("migrated integer expire_at = %d, want %d", gotExpireAt, expireAtUnix)
+	}
+	if storageType != "integer" {
+		t.Fatalf("migrated integer expire_at storage = %q, want %q", storageType, "integer")
+	}
+}
+
+func TestMigratePendingExpireAtToUnixConvertsLegacyNumericText(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer rawDB.Close()
+
+	expireAtUnix := time.Now().UTC().Truncate(time.Second).Unix()
+	if _, err := rawDB.Exec(`CREATE TABLE pending_verifications (
+		chat_id INTEGER NOT NULL,
+		user_id INTEGER NOT NULL,
+		user_language TEXT NOT NULL DEFAULT 'zh-cn',
+		token_timestamp INTEGER NOT NULL DEFAULT 0,
+		token_rand TEXT NOT NULL DEFAULT '',
+		expire_at TEXT NOT NULL,
+		reminder_message_id INTEGER NOT NULL DEFAULT 0,
+		private_message_id INTEGER NOT NULL DEFAULT 0,
+		original_message_id INTEGER NOT NULL DEFAULT 0,
+		message_thread_id INTEGER NOT NULL DEFAULT 0,
+		reply_to_message_id INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (chat_id, user_id)
+	)`); err != nil {
+		t.Fatalf("create legacy pending_verifications error = %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO pending_verifications (`+pendingVerificationColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		-100123, 42, "en", int64(1712300000), "token-a", strconv.FormatInt(expireAtUnix, 10), int64(1), int64(2), int64(3), int64(4), int64(5),
+	); err != nil {
+		t.Fatalf("seed legacy numeric-text pending_verifications row error = %v", err)
+	}
+
+	s := &SQLiteStore{db: rawDB}
+	if err := s.migratePendingExpireAtToUnix(); err != nil {
+		t.Fatalf("migratePendingExpireAtToUnix() error = %v", err)
+	}
+
+	var (
+		gotExpireAt int64
+		storageType string
+	)
+	if err := rawDB.QueryRow(
+		`SELECT expire_at, typeof(expire_at) FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
+		-100123, 42,
+	).Scan(&gotExpireAt, &storageType); err != nil {
+		t.Fatalf("read migrated numeric-text expire_at error = %v", err)
+	}
+	if gotExpireAt != expireAtUnix {
+		t.Fatalf("migrated numeric-text expire_at = %d, want %d", gotExpireAt, expireAtUnix)
+	}
+	if storageType != "integer" {
+		t.Fatalf("migrated numeric-text expire_at storage = %q, want %q", storageType, "integer")
 	}
 }
 

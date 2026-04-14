@@ -97,6 +97,18 @@ func runWithDeps(ctx context.Context, configPath string, deps appDeps) error {
 	appCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
+	if reporter, ok := st.(store.ErrorReporter); ok {
+		go func() {
+			select {
+			case err := <-reporter.Errors():
+				if err != nil {
+					cancel(fmt.Errorf("store stopped unexpectedly: %w", err))
+				}
+			case <-appCtx.Done():
+			}
+		}()
+	}
+
 	if cfg.Turnstile.Enabled {
 		cs := deps.newCaptcha(cfg, st, func(token captcha.VerifiedToken) {
 			log.Printf("[captcha] User %d verified in chat %d", token.UserID, token.ChatID)
@@ -171,10 +183,5 @@ func (d appDeps) withDefaults() appDeps {
 }
 
 func newStoreFromConfig(cfg *config.Config) (store.Store, error) {
-	switch cfg.Store.Type {
-	case "sqlite":
-		return store.NewSQLiteStore(cfg.Store.SQLitePath)
-	default:
-		return nil, fmt.Errorf("unsupported store type: %s", cfg.Store.Type)
-	}
+	return store.NewFromConfig(cfg.Store)
 }

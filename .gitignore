@@ -18,6 +18,7 @@
 coverage.*
 *.coverprofile
 profile.cov
+/out/
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -34,9 +35,8 @@ go.work.sum
 .vscode/
 
 config.toml
+testing.toml
 data/
 *.db
 *.db-shm
 *.db-wal
-
-config.toml

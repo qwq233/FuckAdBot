@@ -23,15 +23,65 @@ func (b *Bot) isBotAdmin(userID int64) bool {
 	return false
 }
 
+func (b *Bot) beginAdminLookup(key adminCacheKey) (*adminLookupCall, bool) {
+	b.adminLookupMu.Lock()
+	defer b.adminLookupMu.Unlock()
+
+	if b.adminLookups == nil {
+		b.adminLookups = make(map[adminCacheKey]*adminLookupCall)
+	}
+	if call, ok := b.adminLookups[key]; ok {
+		return call, false
+	}
+
+	call := &adminLookupCall{done: make(chan struct{})}
+	b.adminLookups[key] = call
+	return call, true
+}
+
+func (b *Bot) finishAdminLookup(key adminCacheKey, call *adminLookupCall, isAdmin bool, err error) {
+	b.adminLookupMu.Lock()
+	delete(b.adminLookups, key)
+	b.adminLookupMu.Unlock()
+
+	call.isAdmin = isAdmin
+	call.err = err
+	close(call.done)
+}
+
 // isGroupAdmin checks if the user is a group admin/creator via Telegram API.
 func (b *Bot) isGroupAdmin(bot *gotgbot.Bot, chatID, userID int64) bool {
+	now := time.Now().UTC()
+	if isAdmin, ok := b.cache.getAdminStatus(chatID, userID, now); ok {
+		b.runtimeStats.recordAdminCacheHit()
+		return isAdmin
+	}
+
+	b.runtimeStats.recordAdminCacheMiss()
+	key := adminCacheKey{chatID: chatID, userID: userID}
+	call, leader := b.beginAdminLookup(key)
+	if !leader {
+		<-call.done
+		if call.err != nil {
+			b.runtimeStats.recordAdminCacheError()
+		}
+		return call.isAdmin
+	}
+
 	member, err := bot.GetChatMember(chatID, userID, nil)
 	if err != nil {
 		log.Printf("[bot] GetChatMember error: %v", err)
+		b.runtimeStats.recordAdminCacheError()
+		b.runtimeStats.recordErrorf("GetChatMember chat=%d user=%d: %v", chatID, userID, err)
+		b.cache.setAdminStatus(chatID, userID, false, now.Add(b.adminNegativeCacheTTL()))
+		b.finishAdminLookup(key, call, false, err)
 		return false
 	}
 	status := member.MergeChatMember().Status
-	return status == "administrator" || status == "creator"
+	isAdmin := status == "administrator" || status == "creator"
+	b.cache.setAdminStatus(chatID, userID, isAdmin, now.Add(b.adminCacheTTL(isAdmin)))
+	b.finishAdminLookup(key, call, isAdmin, nil)
+	return isAdmin
 }
 
 // isAdmin checks if the user is a bot-level admin or a group admin/creator.
@@ -455,30 +505,7 @@ func (b *Bot) cmdUnreject(bot *gotgbot.Bot, ctx *ext.Context) error {
 }
 
 func (b *Bot) cmdStats(bot *gotgbot.Bot, ctx *ext.Context) error {
-	msg := ctx.EffectiveMessage
-	if msg.From == nil {
-		return nil
-	}
-	requestLanguage := b.requestLanguageForUser(msg.From)
-
-	if !b.isAdmin(bot, msg.Chat.Id, msg.From.Id) {
-		return nil
-	}
-
-	words := b.Blacklist.List()
-	var reply string
-	if msg.Chat.Type == "private" {
-		reply = tr(requestLanguage, "stats_private", len(words))
-	} else {
-		groupWords := b.Blacklist.ListGroup(msg.Chat.Id)
-		reply = tr(requestLanguage, "stats_group", len(words), len(groupWords))
-	}
-	bot.SendMessage(msg.Chat.Id, reply, &gotgbot.SendMessageOpts{
-		ParseMode:       "HTML",
-		MessageThreadId: msg.MessageThreadId,
-	})
-
-	return nil
+	return b.handleRuntimeStatsCommand(bot, ctx, false)
 }
 
 func (b *Bot) sendLanguagePreferencePrompt(bot *gotgbot.Bot, chatID int64, viewerLanguage string, notice string) {
@@ -625,10 +652,15 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 	return nil
 }
 
+// htmlReplacer is a package-level replacer to avoid allocating a new one on every escapeHTML call.
+var htmlReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
 // escapeHTML escapes HTML special characters for Telegram HTML mode.
 func escapeHTML(s string) string {
-	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-	return r.Replace(s)
+	if !strings.ContainsAny(s, "&<>") {
+		return s
+	}
+	return htmlReplacer.Replace(s)
 }
 
 func (b *Bot) approveUser(chatID, userID int64) error {
@@ -681,6 +713,23 @@ func (b *Bot) rejectUser(chatID, userID int64) error {
 		b.Store.ResetWarningCount(chatID, userID),
 		b.Store.RemoveVerified(chatID, userID),
 	)
+}
+
+func (b *Bot) adminCacheTTL(isAdmin bool) time.Duration {
+	if b == nil || b.Config == nil {
+		if isAdmin {
+			return 30 * time.Second
+		}
+		return 10 * time.Second
+	}
+	if isAdmin {
+		return b.Config.Bot.GetAdminCacheTTL()
+	}
+	return b.Config.Bot.GetAdminNegativeCacheTTL()
+}
+
+func (b *Bot) adminNegativeCacheTTL() time.Duration {
+	return b.adminCacheTTL(false)
 }
 
 func (b *Bot) unrejectUser(chatID, userID int64) error {

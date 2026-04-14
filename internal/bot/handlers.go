@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -152,26 +153,52 @@ func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, pending *store.Pend
 
 // buildCheckText assembles text from user fields for blacklist matching.
 func buildCheckText(user *gotgbot.User) string {
-	text := user.FirstName
+	if user == nil {
+		return ""
+	}
+
+	size := len(user.FirstName)
 	if user.LastName != "" {
-		text += " " + user.LastName
+		size += len(user.LastName) + 1
 	}
 	if user.Username != "" {
-		text += " " + user.Username
+		size += len(user.Username) + 1
 	}
-	return text
+
+	var builder strings.Builder
+	builder.Grow(size)
+	builder.WriteString(user.FirstName)
+	if user.LastName != "" {
+		if builder.Len() > 0 {
+			builder.WriteByte(' ')
+		}
+		builder.WriteString(user.LastName)
+	}
+	if user.Username != "" {
+		if builder.Len() > 0 {
+			builder.WriteByte(' ')
+		}
+		builder.WriteString(user.Username)
+	}
+	return builder.String()
 }
 
 func (b *Bot) matchUserAgainstBlacklist(bot *gotgbot.Bot, chatID int64, user *gotgbot.User) string {
-	checkText := buildCheckText(user)
-	if matched := b.Blacklist.MatchWithGroup(chatID, checkText); matched != "" {
+	if b == nil || b.Blacklist == nil || user == nil {
+		return ""
+	}
+
+	if matched := b.Blacklist.MatchFieldsWithGroup(chatID, user.FirstName, user.LastName, user.Username); matched != "" {
 		return matched
+	}
+	if bot == nil {
+		return ""
 	}
 
 	if bioChat := b.cachedUserChat(user.Id, func(userID int64) (*gotgbot.ChatFullInfo, error) {
 		return bot.GetChat(userID, nil)
 	}); bioChat != nil && bioChat.Bio != "" {
-		return b.Blacklist.MatchWithGroup(chatID, checkText+" "+bioChat.Bio)
+		return b.Blacklist.MatchFieldsWithGroup(chatID, user.FirstName, user.LastName, user.Username, bioChat.Bio)
 	}
 
 	return ""
@@ -183,13 +210,12 @@ func newVerificationRandomToken(length int) (string, error) {
 		return "", fmt.Errorf("verification random token length must be positive")
 	}
 
-	randomBytes := make([]byte, length)
-	if _, err := rand.Read(randomBytes); err != nil {
+	token := make([]byte, length)
+	if _, err := rand.Read(token); err != nil {
 		return "", err
 	}
 
-	token := make([]byte, length)
-	for index, randomByte := range randomBytes {
+	for index, randomByte := range token {
 		token[index] = alphabet[int(randomByte)%len(alphabet)]
 	}
 

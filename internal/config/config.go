@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,8 +25,12 @@ type Config struct {
 }
 
 type BotConfig struct {
-	Token  string  `toml:"token"`
-	Admins []int64 `toml:"admins"`
+	Token                  string  `toml:"token"`
+	Admins                 []int64 `toml:"admins"`
+	DispatcherMaxRoutines  int     `toml:"dispatcher_max_routines"`
+	AdminCacheTTL          string  `toml:"admin_cache_ttl"`
+	AdminNegativeCacheTTL  string  `toml:"admin_negative_cache_ttl"`
+	PendingSweeperInterval string  `toml:"pending_sweeper_interval"`
 }
 
 type TurnstileConfig struct {
@@ -51,12 +56,30 @@ type ModerationConfig struct {
 }
 
 type StoreConfig struct {
-	Type          string `toml:"type"`
-	SQLitePath    string `toml:"sqlite_path"`
-	RedisAddr     string `toml:"redis_addr"`
-	RedisPassword string `toml:"redis_password"`
-	RedisDB       int    `toml:"redis_db"`
+	Type             string `toml:"type"`
+	DataPath         string `toml:"data_path"`
+	RedisAddr        string `toml:"redis_addr"`
+	RedisPassword    string `toml:"redis_password"`
+	RedisDB          int    `toml:"redis_db"`
+	RedisKeyPrefix   string `toml:"redis_key_prefix"`
+	DualWriteEnabled bool   `toml:"dual_write_enabled"`
+	// Legacy compatibility fields. Runtime tuning is now fixed in code.
+	DualWriteFlushInterval          string `toml:"dual_write_flush_interval"`
+	DualWriteBatchSize              int    `toml:"dual_write_batch_size"`
+	DualWriteMaxConsecutiveFailures int    `toml:"dual_write_max_consecutive_failures"`
+	DualWriteMaxQueueDepth          int    `toml:"dual_write_max_queue_depth"`
 }
+
+const (
+	DefaultDataPath                   = "./data"
+	DefaultSQLiteDatabaseName         = "fuckad.db"
+	DefaultDualWriteQueueDatabaseName = "redis-sync-queue.db"
+	defaultRedisKeyPrefix             = "fuckad:"
+	defaultDispatcherMaxRoutines      = 16
+	defaultAdminCacheTTL              = 30 * time.Second
+	defaultAdminNegativeCacheTTL      = 10 * time.Second
+	defaultPendingSweeperInterval     = time.Second
+)
 
 func (c *TurnstileConfig) GetVerifyTimeout() time.Duration {
 	d, err := time.ParseDuration(c.VerifyTimeout)
@@ -114,6 +137,71 @@ func (c *ModerationConfig) GetOriginalMessageTTL() time.Duration {
 	return ttl
 }
 
+func (c *BotConfig) GetDispatcherMaxRoutines() int {
+	if c.DispatcherMaxRoutines <= 0 {
+		return defaultDispatcherMaxRoutines
+	}
+	return c.DispatcherMaxRoutines
+}
+
+func (c *BotConfig) GetAdminCacheTTL() time.Duration {
+	d, err := time.ParseDuration(c.AdminCacheTTL)
+	if err != nil || d <= 0 {
+		return defaultAdminCacheTTL
+	}
+	return d
+}
+
+func (c *BotConfig) GetAdminNegativeCacheTTL() time.Duration {
+	d, err := time.ParseDuration(c.AdminNegativeCacheTTL)
+	if err != nil || d <= 0 {
+		return defaultAdminNegativeCacheTTL
+	}
+	return d
+}
+
+func (c *BotConfig) GetPendingSweeperInterval() time.Duration {
+	d, err := time.ParseDuration(c.PendingSweeperInterval)
+	if err != nil || d <= 0 {
+		return defaultPendingSweeperInterval
+	}
+	return d
+}
+
+func (c *StoreConfig) Normalize() {
+	c.Type = strings.ToLower(strings.TrimSpace(c.Type))
+	c.DataPath = strings.TrimSpace(c.DataPath)
+	c.RedisAddr = strings.TrimSpace(c.RedisAddr)
+	c.RedisPassword = strings.TrimSpace(c.RedisPassword)
+	c.RedisKeyPrefix = strings.TrimSpace(c.RedisKeyPrefix)
+	c.DualWriteFlushInterval = strings.TrimSpace(c.DualWriteFlushInterval)
+
+	if c.Type == "" {
+		c.Type = "sqlite"
+	}
+	if c.DataPath == "" {
+		c.DataPath = DefaultDataPath
+	}
+	if c.RedisKeyPrefix == "" {
+		c.RedisKeyPrefix = defaultRedisKeyPrefix
+	}
+}
+
+func (c StoreConfig) SQLitePath() string {
+	return filepath.Join(c.DataPath, DefaultSQLiteDatabaseName)
+}
+
+func (c StoreConfig) DualWriteQueuePath() string {
+	return filepath.Join(c.DataPath, DefaultDualWriteQueueDatabaseName)
+}
+
+func (c StoreConfig) HasLegacyDualWriteTuning() bool {
+	return strings.TrimSpace(c.DualWriteFlushInterval) != "" ||
+		c.DualWriteBatchSize != 0 ||
+		c.DualWriteMaxConsecutiveFailures != 0 ||
+		c.DualWriteMaxQueueDepth != 0
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -121,6 +209,12 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
+		Bot: BotConfig{
+			DispatcherMaxRoutines:  defaultDispatcherMaxRoutines,
+			AdminCacheTTL:          defaultAdminCacheTTL.String(),
+			AdminNegativeCacheTTL:  defaultAdminNegativeCacheTTL.String(),
+			PendingSweeperInterval: defaultPendingSweeperInterval.String(),
+		},
 		Turnstile: TurnstileConfig{
 			ListenAddr:    "127.0.0.1",
 			ListenPort:    8080,
@@ -133,8 +227,9 @@ func Load(path string) (*Config, error) {
 			OriginalMessageTTL: "1m",
 		},
 		Store: StoreConfig{
-			Type:       "sqlite",
-			SQLitePath: "./data/fuckad.db",
+			Type:           "sqlite",
+			DataPath:       DefaultDataPath,
+			RedisKeyPrefix: defaultRedisKeyPrefix,
 		},
 	}
 
@@ -148,12 +243,19 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.Turnstile.Domain = strings.ToLower(strings.TrimSpace(cfg.Turnstile.Domain))
+	cfg.Store.Normalize()
 
 	if cfg.Bot.Token == "" {
 		return nil, fmt.Errorf("bot.token is required")
 	}
 
+	if err := validateBotConfig(cfg.Bot); err != nil {
+		return nil, err
+	}
 	if err := validateTurnstileConfig(cfg.Turnstile); err != nil {
+		return nil, err
+	}
+	if err := validateStoreConfig(cfg.Store); err != nil {
 		return nil, err
 	}
 
@@ -171,6 +273,14 @@ func validateUndecodedKeys(keys []toml.Key) error {
 	}
 
 	return fmt.Errorf("unsupported config keys: %s", strings.Join(unsupported, ", "))
+}
+
+func validateBotConfig(cfg BotConfig) error {
+	if cfg.DispatcherMaxRoutines < 0 {
+		return fmt.Errorf("bot.dispatcher_max_routines must be >= 0")
+	}
+
+	return nil
 }
 
 func validateTurnstileConfig(cfg TurnstileConfig) error {
@@ -217,6 +327,34 @@ func validateTurnstileConfig(cfg TurnstileConfig) error {
 
 	if parsed.Hostname() == "" {
 		return fmt.Errorf("turnstile.domain must contain a valid hostname")
+	}
+
+	return nil
+}
+
+func validateStoreConfig(cfg StoreConfig) error {
+	switch cfg.Type {
+	case "sqlite", "redis":
+	default:
+		return fmt.Errorf("store.type must be either sqlite or redis")
+	}
+
+	if strings.TrimSpace(cfg.DataPath) == "" {
+		return fmt.Errorf("store.data_path is required")
+	}
+
+	if cfg.RedisDB < 0 {
+		return fmt.Errorf("store.redis_db must be >= 0")
+	}
+
+	if cfg.DualWriteEnabled && cfg.Type != "sqlite" {
+		return fmt.Errorf("store.dual_write_enabled requires store.type = sqlite")
+	}
+
+	if cfg.Type == "redis" || cfg.DualWriteEnabled {
+		if strings.TrimSpace(cfg.RedisAddr) == "" {
+			return fmt.Errorf("store.redis_addr is required when redis is enabled")
+		}
 	}
 
 	return nil

@@ -186,8 +186,8 @@ func TestSQLiteStoreSetsSchemaVersionToCurrentForFreshDB(t *testing.T) {
 		t.Fatalf("read user_version error = %v", err)
 	}
 
-	if version != 3 {
-		t.Fatalf("user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("user_version = %d, want 4", version)
 	}
 }
 
@@ -262,8 +262,8 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToCurrent(t *testing.T) {
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("migrated user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("migrated user_version = %d, want 4", version)
 	}
 
 	rows, err := rawDB.Query(`PRAGMA table_info(pending_verifications)`)
@@ -387,8 +387,8 @@ func TestSQLiteStoreMigratesVersionOneDatabaseToVersionTwoWithoutDataLoss(t *tes
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("migrated user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("migrated user_version = %d, want 4", version)
 	}
 
 	var userLanguage string
@@ -488,8 +488,8 @@ func TestSQLiteStoreMigratesVersionTwoDatabaseToVersionThree(t *testing.T) {
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("migrated user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("migrated user_version = %d, want 4", version)
 	}
 
 	rows, err := rawDB.Query(`PRAGMA table_info(user_preferences)`)
@@ -1608,12 +1608,12 @@ func TestSQLiteStoreGetPendingDefaultsBlankLanguageFromLegacyRow(t *testing.T) {
 	}
 	defer rawDB.Close()
 
-	expireAt := time.Now().UTC().Add(5 * time.Minute)
+	expireAt := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second)
 	if _, err := rawDB.Exec(
 		`INSERT INTO pending_verifications (
 			chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		-100123, 42, "", 1712300000, "legacy", expireAt.Format(time.RFC3339Nano), 1, 2, 3, 4, 5,
+		-100123, 42, "", 1712300000, "legacy", expireAt.Unix(), 1, 2, 3, 4, 5,
 	); err != nil {
 		t.Fatalf("insert legacy pending row error = %v", err)
 	}

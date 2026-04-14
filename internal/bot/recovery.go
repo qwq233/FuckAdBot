@@ -12,28 +12,22 @@ func (b *Bot) restorePendingVerifications(bot *gotgbot.Bot) error {
 		return nil
 	}
 
+	startedAt := time.Now().UTC()
 	pendingVerifications, err := b.Store.ListPendingVerifications()
 	if err != nil {
 		return err
 	}
-	if len(pendingVerifications) == 0 {
-		return nil
-	}
 
 	now := time.Now().UTC()
+	expiredCount := 0
 	for _, pending := range pendingVerifications {
 		pending := pending
 		if !pending.ExpireAt.After(now) {
+			expiredCount++
 			b.onVerifyWindowExpired(bot, pending)
-			continue
 		}
-
-		b.scheduleOriginalMessageDeletion(bot, pending)
-		b.scheduleUserTimer(pending.ChatID, pending.UserID, pending.ExpireAt.Sub(now), func() {
-			b.onVerifyWindowExpired(bot, pending)
-		})
 	}
 
-	log.Printf("[bot] restored %d pending verification records after startup", len(pendingVerifications))
+	log.Printf("[bot] restored pending verification backlog=%d expired_now=%d recovery_took=%s", len(pendingVerifications), expiredCount, time.Since(startedAt))
 	return nil
 }

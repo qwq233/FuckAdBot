@@ -35,6 +35,24 @@ type PendingResolutionResult struct {
 	ShouldBan    bool
 }
 
+type VerificationReservationResult struct {
+	WarningCount  int
+	LimitExceeded bool
+	Created       bool
+	Existing      *PendingVerification
+}
+
+type UserStateSnapshot struct {
+	Pending      *PendingVerification
+	Status       string
+	WarningCount int
+}
+
+type userStateKey struct {
+	ChatID int64
+	UserID int64
+}
+
 type Store interface {
 	Close() error
 
@@ -55,6 +73,7 @@ type Store interface {
 	HasActivePending(chatID, userID int64) (bool, error)
 	GetPending(chatID, userID int64) (*PendingVerification, error)
 	ListPendingVerifications() ([]PendingVerification, error)
+	ReserveVerificationWindow(pending PendingVerification, maxWarnings int) (VerificationReservationResult, error)
 	CreatePendingIfAbsent(pending PendingVerification) (created bool, existing *PendingVerification, err error)
 	SetPending(pending PendingVerification) error
 	UpdatePendingMetadataByToken(pending PendingVerification) (updated bool, err error)

@@ -95,19 +95,26 @@ func TestCacheEvictExpiredRemovesExpiredKeepsValid(t *testing.T) {
 
 	c.evictExpired(now)
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.languagesMu.RLock()
+	_, hasExp1 := c.languages[1]
+	_, hasFresh2 := c.languages[2]
+	c.languagesMu.RUnlock()
 
-	if _, ok := c.languages[1]; ok {
+	c.userChatsMu.RLock()
+	_, hasExp10 := c.userChats[10]
+	_, hasFresh20 := c.userChats[20]
+	c.userChatsMu.RUnlock()
+
+	if hasExp1 {
 		t.Error("expired language entry 1 should have been evicted")
 	}
-	if _, ok := c.languages[2]; !ok {
+	if !hasFresh2 {
 		t.Error("fresh language entry 2 should remain after eviction")
 	}
-	if _, ok := c.userChats[10]; ok {
+	if hasExp10 {
 		t.Error("expired userChat entry 10 should have been evicted")
 	}
-	if _, ok := c.userChats[20]; !ok {
+	if !hasFresh20 {
 		t.Error("fresh userChat entry 20 should remain after eviction")
 	}
 }

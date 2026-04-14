@@ -33,12 +33,16 @@ func (b *Bot) ensureRuntimeState() {
 	if b.timers == nil {
 		b.timers = make(map[timerKey][]*time.Timer)
 	}
+	if b.userTimers == nil {
+		b.userTimers = make(map[int64]map[timerKey]struct{})
+	}
 	if b.backgroundTimers == nil {
 		b.backgroundTimers = make(map[*time.Timer]struct{})
 	}
 	if b.newUpdater == nil {
 		b.newUpdater = defaultUpdaterFactory
 	}
+	b.runtimeStats.ensureInitialized()
 }
 
 func (b *Bot) SetCaptcha(provider VerificationURLProvider) {
@@ -72,6 +76,7 @@ func (b *Bot) stopAllBackgroundTasks() {
 	stopFns := b.shutdownStops
 
 	b.timers = make(map[timerKey][]*time.Timer)
+	b.userTimers = make(map[int64]map[timerKey]struct{})
 	b.backgroundTimers = make(map[*time.Timer]struct{})
 	b.shutdownStops = nil
 	b.timersMu.Unlock()

@@ -57,7 +57,28 @@ start_help: |-
   /reject &lt;uid&gt; - 拒绝验证
   /unreject &lt;uid&gt; - 撤销拒绝
   /resetverify &lt;uid&gt; - 清空用户所有聊天室验证状态(仅超级管理员)
-  /stats - 查看统计
+  /health - 查看运行健康状态(仅 bot 超级管理员)
+  /stats - 查看运行诊断信息(仅 bot 超级管理员)
+health_title: 健康状态
+stats_title: 运行统计
+diag_store_mode: 存储模式
+diag_uptime: 运行时长
+diag_pending_backlog: 待验证积压
+diag_queue_depth: 双写队列深度
+diag_recent_errors: 最近错误
+diag_captcha_summary: Captcha 成功 / 失败 / 超时
+diag_blacklist_words: 黑名单词汇数
+diag_blacklist_scopes: 黑名单作用域数
+diag_heap: 堆内存
+diag_goroutines: Goroutine 数
+diag_gc_cycles: GC 次数
+diag_last_sweeper: 最近 sweeper
+diag_last_flush: 最近双写 flush
+diag_last_replay: 最近双写 replay
+diag_last_rebuild: 最近双写 rebuild
+diag_admin_cache_summary: 管理员缓存命中 / 未命中 / 错误
+diag_unknown: 暂无
+diag_none: （无）
 verify_params_invalid: ❌ 验证参数无效
 verify_link_not_yours: ❌ 该验证链接不属于您
 verify_state_read_failed: ❌ 读取验证状态失败，请稍后重试

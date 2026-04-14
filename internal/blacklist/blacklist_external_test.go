@@ -228,3 +228,37 @@ func TestMatchReturnsDeterministicDirectMatchForOverlappingWords(t *testing.T) {
 		t.Fatalf("Match() = %q, want %q for overlapping keywords", matched, "she")
 	}
 }
+
+func TestMatchFieldsJoinsFieldsWithSingleSpace(t *testing.T) {
+	t.Parallel()
+
+	bl := blacklist.New()
+	bl.Add("alice bob")
+
+	if matched := bl.MatchFields("Alice", "Bob"); matched != "alice bob" {
+		t.Fatalf("MatchFields() = %q, want %q across field boundary", matched, "alice bob")
+	}
+}
+
+func TestMatchFieldsSupportsUnicodeCaseFolding(t *testing.T) {
+	t.Parallel()
+
+	bl := blacklist.New()
+	bl.Add("привет")
+
+	if matched := bl.MatchFields("До", "брый ПРИВЕТ"); matched != "привет" {
+		t.Fatalf("MatchFields() = %q, want %q for unicode content", matched, "привет")
+	}
+}
+
+func TestMatchFieldsWithGroupPreservesGlobalBeforeGroupLookup(t *testing.T) {
+	t.Parallel()
+
+	bl := blacklist.New()
+	bl.Add("global")
+	bl.AddGroup(-100123, "group")
+
+	if matched := bl.MatchFieldsWithGroup(-100123, "this has GLOBAL and group"); matched != "global" {
+		t.Fatalf("MatchFieldsWithGroup() = %q, want %q from global matcher first", matched, "global")
+	}
+}

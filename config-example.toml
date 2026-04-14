@@ -3,6 +3,10 @@
 token = ""
 # Super admin Telegram user IDs
 admins = []
+dispatcher_max_routines = 16
+admin_cache_ttl = "30s"
+admin_negative_cache_ttl = "10s"
+pending_sweeper_interval = "1s"
 
 [turnstile]
 enabled = true
@@ -39,11 +43,18 @@ original_message_ttl = "1m"
 verify_window = "5m"
 
 [store]
-# Storage backend: "sqlite"
+# Storage backend: "sqlite" or "redis"
 type = "sqlite"
-# SQLite database file path
-sqlite_path = "./data/fuckad.db"
-# Redis settings (for future use)
+# Data directory. The SQLite primary database is always created as
+# <data_path>/fuckad.db. When dual write is enabled, the retry queue is always
+# created as <data_path>/redis-sync-queue.db.
+data_path = "./data"
+# Redis settings
 redis_addr = ""
 redis_password = ""
 redis_db = 0
+redis_key_prefix = "fuckad:"
+# Enable SQLite primary + Redis cache dual-write mode. This option is valid
+# only when type = "sqlite".
+dual_write_enabled = false
+# Dual-write tuning is fixed in code to keep production behavior predictable.

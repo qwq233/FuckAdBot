@@ -126,7 +126,7 @@ func TestRestorePendingVerificationsResolvesExpiredPendingImmediately(t *testing
 	}
 }
 
-func TestRestorePendingVerificationsSchedulesFutureExpiry(t *testing.T) {
+func TestRestorePendingVerificationsLeavesFutureExpiryForSweeper(t *testing.T) {
 	t.Parallel()
 
 	store, err := storepkg.NewSQLiteStore(filepath.Join(t.TempDir(), "test.db"))
@@ -141,7 +141,7 @@ func TestRestorePendingVerificationsSchedulesFutureExpiry(t *testing.T) {
 		UserLanguage: "zh-cn",
 		Timestamp:    time.Now().Unix(),
 		RandomToken:  "future01",
-		ExpireAt:     time.Now().UTC().Add(40 * time.Millisecond),
+		ExpireAt:     time.Now().UTC().Add(time.Minute),
 	}
 	if err := store.SetPending(pending); err != nil {
 		t.Fatalf("SetPending() error = %v", err)
@@ -162,20 +162,17 @@ func TestRestorePendingVerificationsSchedulesFutureExpiry(t *testing.T) {
 	if err := b.restorePendingVerifications(nil); err != nil {
 		t.Fatalf("restorePendingVerifications() error = %v", err)
 	}
-
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		warnings, err := store.GetWarningCount(pending.ChatID, pending.UserID)
-		if err != nil {
-			t.Fatalf("GetWarningCount() error = %v", err)
-		}
-		if warnings == 1 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if len(b.timers) != 0 {
+		t.Fatalf("timers map = %+v, want empty because future expiry is handled by sweeper", b.timers)
 	}
 
-	t.Fatal("scheduled expiry did not replay pending verification in time")
+	warnings, err := store.GetWarningCount(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetWarningCount() error = %v", err)
+	}
+	if warnings != 0 {
+		t.Fatalf("GetWarningCount() = %d, want 0 before sweeper tick", warnings)
+	}
 }
 
 func TestPendingForOriginalMessageDeletionSkipsClearedPending(t *testing.T) {

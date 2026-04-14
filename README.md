@@ -7,7 +7,7 @@
 - **黑名单检测**: 自动匹配用户 username / 姓名 / bio（best-effort）中的黑名单关键词，命中则删除消息并 ban 用户
 - **Cloudflare Turnstile 验证**: 未验证用户首次发言时，机器人会直接回复该用户的消息发送验证提示；在验证窗口内该用户后续消息会被立即删除。若在 `original_message_ttl` 内仍未完成验证，则首条待验证消息会被删除。提醒会至少保留完整的验证窗口。
 - **渐进式处罚**: 每次提醒后有 5 分钟验证窗口，超时未验证计为一次未验证发言，3 次后自动 ban
-- **管理员命令**: 热添加/删除黑名单、批准/拒绝用户验证
+- **管理员命令**: 热添加/删除黑名单、批准/拒绝用户验证，以及仅 bot 超级管理员可见的运行态 `/health` `/stats`
 - **频道评论区适配**: 支持非群成员通过频道评论的场景
 
 ## 快速开始
@@ -32,6 +32,20 @@ PowerShell:
 ```powershell
 Copy-Item config-example.toml config.toml
 ```
+
+`[store]` 支持 3 种模式：
+
+- `type = "sqlite"`: 单库模式，主库固定写入 `<data_path>/fuckad.db`
+- `type = "redis"`: Redis 主库模式
+- `type = "sqlite"` 且 `dual_write_enabled = true`: SQLite 主库 + Redis 读缓存双写，重试队列固定写入 `<data_path>/redis-sync-queue.db`
+
+双写的 flush/batch/queue 深度等调优参数已固化在代码常量中，不再作为运行时配置暴露。
+
+### Benchmark / Loadtest Redis
+
+复制 `testing-example.toml` 为 `testing.toml` 后，`internal/store` 的 benchmark 和 `cmd/loadtest` 在 `redis` / `dual-write` 模式下会优先使用 `[redis]` 里配置的真实 Redis 实例；如果 `testing.toml` 不存在，则继续自动回退到内置 `miniredis`。
+
+`testing.toml` 只用于本地测试，不应提交到仓库；代码会为每次 benchmark / loadtest 生成独立的 key prefix，并在 `cleanup = true` 时自动清理测试键。
 
 ### 3. 运行
 
@@ -59,9 +73,17 @@ Copy-Item config-example.toml config.toml
 | `/reject <uid>` | 拒绝用户验证，后续消息静默删除 |
 | `/unreject <uid>` | 撤销拒绝，允许用户重新验证 |
 | `/resetverify <uid>` | 清空用户在所有聊天室中的验证状态，仅超级管理员可用 |
-| `/stats` | 查看统计信息 |
+| `/health` | 查看简要运行健康状态，仅 `bot.admins` 可用 |
+| `/stats` | 查看详细运行统计，仅 `bot.admins` 可用 |
 
 提醒消息上的按钮布局：第一行是被审核用户自己的验证按钮；第二行左侧是管理员批准按钮，右侧是管理员拒绝按钮。非管理员点击审批按钮会被直接拒绝。
+
+## 运行时加固
+
+- 验证窗口恢复改为单个 sweeper 周期扫描，不再为每条 pending 记录恢复多组 timer
+- 群管理员检查带 TTL 缓存，减少热路径 `GetChatMember` 请求
+- Captcha HTTP 服务默认启用读写超时、Header 限制和 1 MiB 表单体积限制
+- `/health` 与 `/stats` 会输出 store 模式、pending backlog、dual-write 队列、admin cache 命中情况和 captcha 成败计数
 
 ## 消息处理流程
 

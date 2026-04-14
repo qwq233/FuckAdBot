@@ -17,9 +17,12 @@
 #       # practical approach for a file that is already protected by the host
 #       # filesystem permissions and ProtectSystem=strict.)
 #
-#  3. Update config.toml — change sqlite_path to the StateDirectory absolute path:
-#       sqlite_path = "/var/lib/fuckad/fuckad.db"
+#  3. Update config.toml — set data_path to the StateDirectory absolute path:
+#       data_path = "/var/lib/fuckad"
 #     systemd will create /var/lib/fuckad/ and own it with the dynamic UID.
+#     The application will place the SQLite primary database at
+#     /var/lib/fuckad/fuckad.db and, when dual write is enabled, the retry
+#     queue at /var/lib/fuckad/redis-sync-queue.db.
 #
 #  4. Install and start the unit:
 #       sudo cp deploy/fuckad.service /etc/systemd/system/
@@ -61,7 +64,7 @@ WorkingDirectory=/path/to/bot
 DynamicUser=yes
 # StateDirectory creates /var/lib/fuckad/, sets ownership to the dynamic UID,
 # and automatically grants read-write access under ProtectSystem=strict.
-# Set sqlite_path = "/var/lib/fuckad/fuckad.db" in config.toml.
+# Set data_path = "/var/lib/fuckad" in config.toml.
 StateDirectory=fuckad
 
 # ── Restart policy ────────────────────────────────────────────────────────────
@@ -69,9 +72,8 @@ Restart=on-failure
 RestartSec=5s
 
 # ── Shutdown ──────────────────────────────────────────────────────────────────
-# The application has no signal/shutdown handler; the process is forcefully
-# terminated after TimeoutStopSec.  SQLite uses WAL mode by default so abrupt
-# termination is safe.
+# The application handles SIGTERM/SIGINT and performs a graceful shutdown
+# before TimeoutStopSec elapses.
 TimeoutStopSec=10s
 KillMode=mixed
 

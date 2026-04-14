@@ -4,12 +4,15 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 type automatonNode struct {
-	next    map[rune]int
-	fail    int
-	outputs []string
+	ascii  [utf8.RuneSelf]int
+	next   map[rune]int
+	fail   int
+	output string
 }
 
 type matcher struct {
@@ -22,6 +25,8 @@ type Blacklist struct {
 	groups        map[int64]map[string]struct{}
 	globalMatcher *matcher
 	groupMatchers map[int64]*matcher
+	globalVersion uint64           // incremented on every global write, under mu
+	groupVersions map[int64]uint64 // incremented on every per-group write, under mu
 }
 
 func New() *Blacklist {
@@ -29,38 +34,74 @@ func New() *Blacklist {
 		global:        make(map[string]struct{}),
 		groups:        make(map[int64]map[string]struct{}),
 		groupMatchers: make(map[int64]*matcher),
+		groupVersions: make(map[int64]uint64),
 	}
 }
 
 func (b *Blacklist) Load(words []string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	for _, w := range words {
 		if normalized := normalizeWord(w); normalized != "" {
 			b.global[normalized] = struct{}{}
 		}
 	}
-	b.globalMatcher = newMatcher(b.global)
+	snapshot := cloneWordSet(b.global)
+	b.globalVersion++
+	ver := b.globalVersion
+	b.mu.Unlock()
+
+	m := newMatcher(snapshot)
+
+	b.mu.Lock()
+	if b.globalVersion == ver {
+		b.globalMatcher = m
+	}
+	b.mu.Unlock()
 }
 
 func (b *Blacklist) Add(word string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if normalized := normalizeWord(word); normalized != "" {
-		b.global[normalized] = struct{}{}
-		b.globalMatcher = newMatcher(b.global)
+	normalized := normalizeWord(word)
+	if normalized == "" {
+		return
 	}
+
+	b.mu.Lock()
+	b.global[normalized] = struct{}{}
+	snapshot := cloneWordSet(b.global)
+	b.globalVersion++
+	ver := b.globalVersion
+	b.mu.Unlock()
+
+	m := newMatcher(snapshot)
+
+	b.mu.Lock()
+	if b.globalVersion == ver {
+		b.globalMatcher = m
+	}
+	b.mu.Unlock()
 }
 
 func (b *Blacklist) Remove(word string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	key := normalizeWord(word)
+
+	b.mu.Lock()
 	if _, ok := b.global[key]; !ok {
+		b.mu.Unlock()
 		return false
 	}
 	delete(b.global, key)
-	b.globalMatcher = newMatcher(b.global)
+	snapshot := cloneWordSet(b.global)
+	b.globalVersion++
+	ver := b.globalVersion
+	b.mu.Unlock()
+
+	m := newMatcher(snapshot)
+
+	b.mu.Lock()
+	if b.globalVersion == ver {
+		b.globalMatcher = m
+	}
+	b.mu.Unlock()
 	return true
 }
 
@@ -80,11 +121,19 @@ func (b *Blacklist) Match(text string) string {
 	return b.globalMatcher.Match(text)
 }
 
+func (b *Blacklist) MatchFields(fields ...string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.globalMatcher == nil {
+		return ""
+	}
+	return b.globalMatcher.MatchFields(fields...)
+}
+
 // --- Group-scoped methods ---
 
 func (b *Blacklist) LoadGroup(chatID int64, words []string) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if _, ok := b.groups[chatID]; !ok {
 		b.groups[chatID] = make(map[string]struct{})
 	}
@@ -93,39 +142,78 @@ func (b *Blacklist) LoadGroup(chatID int64, words []string) {
 			b.groups[chatID][normalized] = struct{}{}
 		}
 	}
-	b.groupMatchers[chatID] = newMatcher(b.groups[chatID])
+	snapshot := cloneWordSet(b.groups[chatID])
+	b.groupVersions[chatID]++
+	ver := b.groupVersions[chatID]
+	b.mu.Unlock()
+
+	m := newMatcher(snapshot)
+
+	b.mu.Lock()
+	if b.groupVersions[chatID] == ver {
+		b.groupMatchers[chatID] = m
+	}
+	b.mu.Unlock()
 }
 
 func (b *Blacklist) AddGroup(chatID int64, word string) {
+	normalized := normalizeWord(word)
+	if normalized == "" {
+		return
+	}
+
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if _, ok := b.groups[chatID]; !ok {
 		b.groups[chatID] = make(map[string]struct{})
 	}
-	if normalized := normalizeWord(word); normalized != "" {
-		b.groups[chatID][normalized] = struct{}{}
-		b.groupMatchers[chatID] = newMatcher(b.groups[chatID])
+	b.groups[chatID][normalized] = struct{}{}
+	snapshot := cloneWordSet(b.groups[chatID])
+	b.groupVersions[chatID]++
+	ver := b.groupVersions[chatID]
+	b.mu.Unlock()
+
+	m := newMatcher(snapshot)
+
+	b.mu.Lock()
+	if b.groupVersions[chatID] == ver {
+		b.groupMatchers[chatID] = m
 	}
+	b.mu.Unlock()
 }
 
 func (b *Blacklist) RemoveGroup(chatID int64, word string) bool {
+	key := normalizeWord(word)
+
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	group, ok := b.groups[chatID]
 	if !ok {
+		b.mu.Unlock()
 		return false
 	}
-	key := normalizeWord(word)
 	if _, exists := group[key]; !exists {
+		b.mu.Unlock()
 		return false
 	}
 	delete(group, key)
 	if len(group) == 0 {
 		delete(b.groups, chatID)
 		delete(b.groupMatchers, chatID)
+		delete(b.groupVersions, chatID)
+		b.mu.Unlock()
 		return true
 	}
-	b.groupMatchers[chatID] = newMatcher(group)
+	snapshot := cloneWordSet(group)
+	b.groupVersions[chatID]++
+	ver := b.groupVersions[chatID]
+	b.mu.Unlock()
+
+	m := newMatcher(snapshot)
+
+	b.mu.Lock()
+	if b.groupVersions[chatID] == ver {
+		b.groupMatchers[chatID] = m
+	}
+	b.mu.Unlock()
 	return true
 }
 
@@ -154,8 +242,30 @@ func (b *Blacklist) MatchWithGroup(chatID int64, text string) string {
 	return ""
 }
 
+func (b *Blacklist) MatchFieldsWithGroup(chatID int64, fields ...string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.globalMatcher != nil {
+		if matched := b.globalMatcher.MatchFields(fields...); matched != "" {
+			return matched
+		}
+	}
+	if groupMatcher, ok := b.groupMatchers[chatID]; ok && groupMatcher != nil {
+		return groupMatcher.MatchFields(fields...)
+	}
+	return ""
+}
+
 func normalizeWord(word string) string {
 	return strings.ToLower(strings.TrimSpace(word))
+}
+
+func cloneWordSet(m map[string]struct{}) map[string]struct{} {
+	clone := make(map[string]struct{}, len(m))
+	for k := range m {
+		clone[k] = struct{}{}
+	}
+	return clone
 }
 
 func sortedWords(words map[string]struct{}) []string {
@@ -174,80 +284,167 @@ func newMatcher(words map[string]struct{}) *matcher {
 
 	ordered := sortedWords(words)
 	m := &matcher{
-		nodes: []automatonNode{{next: make(map[rune]int)}},
+		nodes: []automatonNode{{}},
 	}
 
 	for _, word := range ordered {
 		state := 0
 		for _, r := range word {
-			nextState, ok := m.nodes[state].next[r]
-			if !ok {
+			nextState := m.transition(state, r)
+			if nextState == 0 {
 				nextState = len(m.nodes)
-				m.nodes = append(m.nodes, automatonNode{next: make(map[rune]int)})
-				m.nodes[state].next[r] = nextState
+				m.nodes = append(m.nodes, automatonNode{})
+				m.setTransition(state, r, nextState)
 			}
 			state = nextState
 		}
-		m.nodes[state].outputs = append(m.nodes[state].outputs, word)
+		if m.nodes[state].output == "" {
+			m.nodes[state].output = word
+		}
 	}
 
-	queue := make([]int, 0)
-	for _, nextState := range m.nodes[0].next {
+	queue := make([]int, 0, len(m.nodes))
+	m.forEachTransition(0, func(_ rune, nextState int) {
 		queue = append(queue, nextState)
-	}
+	})
 
 	for len(queue) > 0 {
 		state := queue[0]
 		queue = queue[1:]
 
-		for r, nextState := range m.nodes[state].next {
+		m.forEachTransition(state, func(r rune, nextState int) {
 			queue = append(queue, nextState)
 
 			fail := m.nodes[state].fail
 			for fail != 0 {
-				if fallback, ok := m.nodes[fail].next[r]; ok {
+				if fallback := m.transition(fail, r); fallback != 0 {
 					m.nodes[nextState].fail = fallback
 					break
 				}
 				fail = m.nodes[fail].fail
 			}
-			if fallback, ok := m.nodes[fail].next[r]; ok && state != 0 {
+			if fallback := m.transition(fail, r); fallback != 0 && state != 0 {
 				m.nodes[nextState].fail = fallback
 			}
 
-			if outputs := m.nodes[m.nodes[nextState].fail].outputs; len(outputs) > 0 {
-				m.nodes[nextState].outputs = append(m.nodes[nextState].outputs, outputs...)
+			if m.nodes[nextState].output == "" {
+				m.nodes[nextState].output = m.nodes[m.nodes[nextState].fail].output
 			}
-		}
+		})
 	}
 
 	return m
 }
 
 func (m *matcher) Match(text string) string {
+	return m.MatchFields(text)
+}
+
+func (m *matcher) MatchFields(fields ...string) string {
 	if m == nil {
 		return ""
 	}
 
 	state := 0
-	for _, r := range strings.ToLower(text) {
-		for state != 0 {
-			if _, ok := m.nodes[state].next[r]; ok {
-				break
+	needsSeparator := false
+	for _, text := range fields {
+		if text == "" {
+			continue
+		}
+		if needsSeparator {
+			if matched := m.advanceASCII(' ', &state); matched != "" {
+				return matched
 			}
-			state = m.nodes[state].fail
 		}
+		needsSeparator = true
 
-		if nextState, ok := m.nodes[state].next[r]; ok {
-			state = nextState
-		} else {
-			state = 0
-		}
+		for index := 0; index < len(text); {
+			if text[index] < utf8.RuneSelf {
+				if matched := m.advanceASCII(foldMatcherByte(text[index]), &state); matched != "" {
+					return matched
+				}
+				index++
+				continue
+			}
 
-		if len(m.nodes[state].outputs) > 0 {
-			return m.nodes[state].outputs[0]
+			r, size := utf8.DecodeRuneInString(text[index:])
+			if matched := m.advanceRune(foldMatcherRune(r), &state); matched != "" {
+				return matched
+			}
+			index += size
 		}
 	}
 
 	return ""
+}
+
+func (m *matcher) advanceASCII(b byte, state *int) string {
+	current := *state
+	for current != 0 && m.nodes[current].ascii[b] == 0 {
+		current = m.nodes[current].fail
+	}
+
+	current = m.nodes[current].ascii[b]
+	*state = current
+	return m.nodes[current].output
+}
+
+func (m *matcher) advanceRune(r rune, state *int) string {
+	current := *state
+	for current != 0 {
+		if m.transition(current, r) != 0 {
+			break
+		}
+		current = m.nodes[current].fail
+	}
+
+	current = m.transition(current, r)
+	*state = current
+	return m.nodes[current].output
+}
+
+func (m *matcher) transition(state int, r rune) int {
+	if r >= 0 && r < utf8.RuneSelf {
+		return m.nodes[state].ascii[byte(r)]
+	}
+	if m.nodes[state].next == nil {
+		return 0
+	}
+	return m.nodes[state].next[r]
+}
+
+func (m *matcher) setTransition(state int, r rune, nextState int) {
+	if r >= 0 && r < utf8.RuneSelf {
+		m.nodes[state].ascii[byte(r)] = nextState
+		return
+	}
+	if m.nodes[state].next == nil {
+		m.nodes[state].next = make(map[rune]int)
+	}
+	m.nodes[state].next[r] = nextState
+}
+
+func (m *matcher) forEachTransition(state int, yield func(rune, int)) {
+	for ascii, nextState := range m.nodes[state].ascii {
+		if nextState != 0 {
+			yield(rune(ascii), nextState)
+		}
+	}
+	for r, nextState := range m.nodes[state].next {
+		yield(r, nextState)
+	}
+}
+
+func foldMatcherByte(b byte) byte {
+	if b >= 'A' && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+func foldMatcherRune(r rune) rune {
+	if r >= 'A' && r <= 'Z' {
+		return r + ('a' - 'A')
+	}
+	return unicode.ToLower(r)
 }

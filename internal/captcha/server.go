@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/qwq233/fuckadbot/internal/config"
@@ -34,6 +35,8 @@ type Server struct {
 	listen       func(network, address string) (net.Listener, error)
 	serve        func(server *http.Server, listener net.Listener) error
 	serveErrors  chan error
+	statsMu      sync.RWMutex
+	stats        RuntimeStats
 }
 
 type VerifiedToken struct {
@@ -43,7 +46,15 @@ type VerifiedToken struct {
 	RandomToken string
 }
 
-const turnstileVerifyRequestTimeout = 10 * time.Second
+const (
+	turnstileVerifyRequestTimeout       = 10 * time.Second
+	serverReadHeaderTimeout             = 5 * time.Second
+	serverReadTimeout                   = 15 * time.Second
+	serverWriteTimeout                  = 15 * time.Second
+	serverIdleTimeout                   = 60 * time.Second
+	serverMaxHeaderBytes                = 16 * 1024
+	serverMaxFormBytes            int64 = 1 << 20
+)
 
 func NewServer(cfg *config.TurnstileConfig, st store.Store, verifyWindow time.Duration, botToken string, onVerify func(token VerifiedToken)) *Server {
 	tmpl := template.Must(template.ParseFS(verifyHTML, "verify.html"))
@@ -89,7 +100,15 @@ func (s *Server) Start() error {
 		return err
 	}
 
-	s.httpServer = &http.Server{Addr: listener.Addr().String(), Handler: mux}
+	s.httpServer = &http.Server{
+		Addr:              listener.Addr().String(),
+		Handler:           mux,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+		MaxHeaderBytes:    serverMaxHeaderBytes,
+	}
 	log.Printf("[captcha] HTTP server listening on %s", listener.Addr().String())
 	go func() {
 		if err := s.serve(s.httpServer, listener); err != nil && !errors.Is(err, http.ErrServerClosed) {

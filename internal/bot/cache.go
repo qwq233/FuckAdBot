@@ -25,15 +25,33 @@ type cachedUserChatInfo struct {
 	expiresAt time.Time
 }
 
+type adminCacheKey struct {
+	chatID int64
+	userID int64
+}
+
+type cachedAdminStatus struct {
+	isAdmin   bool
+	expiresAt time.Time
+}
+
+// botCache holds short-lived in-process caches for Telegram API lookups.
+// The three maps are guarded by separate RWMutexes so that concurrent handler
+// goroutines do not contend on unrelated cache domains.
 type botCache struct {
-	mu        sync.RWMutex
-	languages map[int64]cachedLanguagePreference
-	userChats map[int64]cachedUserChatInfo
+	languagesMu sync.RWMutex
+	languages   map[int64]cachedLanguagePreference
+
+	userChatsMu sync.RWMutex
+	userChats   map[int64]cachedUserChatInfo
+
+	adminStatusMu sync.RWMutex
+	adminStatus   map[adminCacheKey]cachedAdminStatus
 }
 
 func (c *botCache) getLanguagePreference(userID int64, now time.Time) (cachedLanguagePreference, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.languagesMu.RLock()
+	defer c.languagesMu.RUnlock()
 
 	if c.languages == nil {
 		return cachedLanguagePreference{}, false
@@ -48,8 +66,8 @@ func (c *botCache) getLanguagePreference(userID int64, now time.Time) (cachedLan
 }
 
 func (c *botCache) setLanguagePreference(userID int64, entry cachedLanguagePreference) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.languagesMu.Lock()
+	defer c.languagesMu.Unlock()
 
 	if c.languages == nil {
 		c.languages = make(map[int64]cachedLanguagePreference)
@@ -59,8 +77,8 @@ func (c *botCache) setLanguagePreference(userID int64, entry cachedLanguagePrefe
 }
 
 func (c *botCache) getUserChat(userID int64, now time.Time) (*gotgbot.ChatFullInfo, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.userChatsMu.RLock()
+	defer c.userChatsMu.RUnlock()
 
 	if c.userChats == nil {
 		return nil, false
@@ -75,8 +93,8 @@ func (c *botCache) getUserChat(userID int64, now time.Time) (*gotgbot.ChatFullIn
 }
 
 func (c *botCache) setUserChat(userID int64, chat *gotgbot.ChatFullInfo, expiresAt time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.userChatsMu.Lock()
+	defer c.userChatsMu.Unlock()
 
 	if c.userChats == nil {
 		c.userChats = make(map[int64]cachedUserChatInfo)
@@ -84,6 +102,36 @@ func (c *botCache) setUserChat(userID int64, chat *gotgbot.ChatFullInfo, expires
 
 	c.userChats[userID] = cachedUserChatInfo{
 		chat:      chat,
+		expiresAt: expiresAt,
+	}
+}
+
+func (c *botCache) getAdminStatus(chatID, userID int64, now time.Time) (bool, bool) {
+	c.adminStatusMu.RLock()
+	defer c.adminStatusMu.RUnlock()
+
+	if c.adminStatus == nil {
+		return false, false
+	}
+
+	entry, ok := c.adminStatus[adminCacheKey{chatID: chatID, userID: userID}]
+	if !ok || !entry.expiresAt.After(now) {
+		return false, false
+	}
+
+	return entry.isAdmin, true
+}
+
+func (c *botCache) setAdminStatus(chatID, userID int64, isAdmin bool, expiresAt time.Time) {
+	c.adminStatusMu.Lock()
+	defer c.adminStatusMu.Unlock()
+
+	if c.adminStatus == nil {
+		c.adminStatus = make(map[adminCacheKey]cachedAdminStatus)
+	}
+
+	c.adminStatus[adminCacheKey{chatID: chatID, userID: userID}] = cachedAdminStatus{
+		isAdmin:   isAdmin,
 		expiresAt: expiresAt,
 	}
 }
@@ -112,16 +160,52 @@ func (b *Bot) cachedUserChat(userID int64, fetch func(int64) (*gotgbot.ChatFullI
 const cacheCleanupInterval = 5 * time.Minute
 
 func (c *botCache) evictExpired(now time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// Collect stale language keys under RLock to minimize write-lock duration.
+	var staleLang []int64
+	c.languagesMu.RLock()
 	for k, v := range c.languages {
 		if !v.expiresAt.After(now) {
-			delete(c.languages, k)
+			staleLang = append(staleLang, k)
 		}
 	}
+	c.languagesMu.RUnlock()
+	if len(staleLang) > 0 {
+		c.languagesMu.Lock()
+		for _, k := range staleLang {
+			delete(c.languages, k)
+		}
+		c.languagesMu.Unlock()
+	}
+
+	var staleChats []int64
+	c.userChatsMu.RLock()
 	for k, v := range c.userChats {
 		if !v.expiresAt.After(now) {
+			staleChats = append(staleChats, k)
+		}
+	}
+	c.userChatsMu.RUnlock()
+	if len(staleChats) > 0 {
+		c.userChatsMu.Lock()
+		for _, k := range staleChats {
 			delete(c.userChats, k)
 		}
+		c.userChatsMu.Unlock()
+	}
+
+	var staleAdmin []adminCacheKey
+	c.adminStatusMu.RLock()
+	for k, v := range c.adminStatus {
+		if !v.expiresAt.After(now) {
+			staleAdmin = append(staleAdmin, k)
+		}
+	}
+	c.adminStatusMu.RUnlock()
+	if len(staleAdmin) > 0 {
+		c.adminStatusMu.Lock()
+		for _, k := range staleAdmin {
+			delete(c.adminStatus, k)
+		}
+		c.adminStatusMu.Unlock()
 	}
 }

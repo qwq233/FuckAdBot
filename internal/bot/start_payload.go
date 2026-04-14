@@ -2,7 +2,6 @@ package bot
 
 import (
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 )
@@ -10,7 +9,8 @@ import (
 const verificationStartPayloadPrefix = "verify"
 
 func BuildVerificationStartPayload(chatID, userID, verificationInfoID int64) string {
-	return fmt.Sprintf("%s_%d_%d_%d", verificationStartPayloadPrefix, chatID, userID, verificationInfoID)
+	buf := make([]byte, 0, len(verificationStartPayloadPrefix)+3+(3*20))
+	return string(appendVerificationStartPayload(buf, chatID, userID, verificationInfoID))
 }
 
 func ParseVerificationStartPayload(payload string) (int64, int64, int64, error) {
@@ -38,6 +38,20 @@ func ParseVerificationStartPayload(payload string) (int64, int64, int64, error) 
 }
 
 func BuildVerificationStartURL(botUsername string, chatID, userID, verificationInfoID int64) string {
-	payload := BuildVerificationStartPayload(chatID, userID, verificationInfoID)
-	return fmt.Sprintf("https://t.me/%s?start=%s", botUsername, url.QueryEscape(payload))
+	buf := make([]byte, 0, len("https://t.me/")+len(botUsername)+len("?start=")+len(verificationStartPayloadPrefix)+3+(3*20))
+	buf = append(buf, "https://t.me/"...)
+	buf = append(buf, botUsername...)
+	buf = append(buf, "?start="...)
+	return string(appendVerificationStartPayload(buf, chatID, userID, verificationInfoID))
+}
+
+func appendVerificationStartPayload(dst []byte, chatID, userID, verificationInfoID int64) []byte {
+	dst = append(dst, verificationStartPayloadPrefix...)
+	dst = append(dst, '_')
+	dst = strconv.AppendInt(dst, chatID, 10)
+	dst = append(dst, '_')
+	dst = strconv.AppendInt(dst, userID, 10)
+	dst = append(dst, '_')
+	dst = strconv.AppendInt(dst, verificationInfoID, 10)
+	return dst
 }

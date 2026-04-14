@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
@@ -20,7 +21,11 @@ import (
 
 type timerKey struct{ chatID, userID int64 }
 
-const dispatcherMaxRoutines = 16
+type adminLookupCall struct {
+	done    chan struct{}
+	isAdmin bool
+	err     error
+}
 
 type Bot struct {
 	Bot       *gotgbot.Bot
@@ -30,11 +35,17 @@ type Bot struct {
 	Captcha   VerificationURLProvider
 
 	cache            botCache
+	adminLookupMu    sync.Mutex
+	adminLookups     map[adminCacheKey]*adminLookupCall
+	diagnosticsMu    sync.RWMutex
+	diagnostics      botDiagnosticsSnapshot
 	timersMu         sync.Mutex
 	timers           map[timerKey][]*time.Timer
+	userTimers       map[int64]map[timerKey]struct{} // reverse index: userID -> set of timerKeys
 	backgroundTimers map[*time.Timer]struct{}
 	shutdownStops    []func()
 	newUpdater       updaterFactory
+	runtimeStats     botRuntimeStats
 }
 
 func New(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs VerificationURLProvider) (*Bot, error) {
@@ -67,6 +78,10 @@ func (b *Bot) trackUserTimer(chatID, userID int64, t *time.Timer) {
 	b.ensureRuntimeState()
 	key := timerKey{chatID, userID}
 	b.timers[key] = append(b.timers[key], t)
+	if b.userTimers[userID] == nil {
+		b.userTimers[userID] = make(map[timerKey]struct{})
+	}
+	b.userTimers[userID][key] = struct{}{}
 }
 
 func (b *Bot) removeTrackedTimer(chatID, userID int64, target *time.Timer) {
@@ -92,6 +107,12 @@ func (b *Bot) removeTrackedTimer(chatID, userID int64, target *time.Timer) {
 
 	if len(filtered) == 0 {
 		delete(b.timers, key)
+		if b.userTimers != nil {
+			delete(b.userTimers[userID], key)
+			if len(b.userTimers[userID]) == 0 {
+				delete(b.userTimers, userID)
+			}
+		}
 		return
 	}
 
@@ -110,24 +131,28 @@ func (b *Bot) cancelUserTimers(chatID, userID int64) {
 		t.Stop()
 	}
 	delete(b.timers, key)
+	if b.userTimers != nil {
+		delete(b.userTimers[userID], key)
+		if len(b.userTimers[userID]) == 0 {
+			delete(b.userTimers, userID)
+		}
+	}
 }
 
 func (b *Bot) cancelAllTimersForUser(userID int64) {
 	b.timersMu.Lock()
 	defer b.timersMu.Unlock()
-	if b.timers == nil {
+	if b.timers == nil || b.userTimers == nil {
 		return
 	}
 
-	for key, timers := range b.timers {
-		if key.userID != userID {
-			continue
-		}
-		for _, t := range timers {
+	for key := range b.userTimers[userID] {
+		for _, t := range b.timers[key] {
 			t.Stop()
 		}
 		delete(b.timers, key)
 	}
+	delete(b.userTimers, userID)
 }
 
 func (b *Bot) scheduleUserTimer(chatID, userID int64, delay time.Duration, fn func()) *time.Timer {
@@ -135,14 +160,23 @@ func (b *Bot) scheduleUserTimer(chatID, userID int64, delay time.Duration, fn fu
 		return nil
 	}
 
-	trackedTimer := make(chan *time.Timer, 1)
+	// Use an atomic pointer instead of a buffered channel to pass the timer handle
+	// into its own callback without a heap allocation per timer.
+	var ref atomic.Pointer[time.Timer]
 	timer := time.AfterFunc(delay, func() {
-		timer := <-trackedTimer
-		defer b.removeTrackedTimer(chatID, userID, timer)
+		// The callback fires after AfterFunc returns (delay > 0 is guaranteed
+		// above), so ref is always set before this goroutine is unblocked.
+		ptr := ref.Load()
+		for ptr == nil {
+			// Extremely rare spin; only reachable if the OS schedules this
+			// goroutine before ref.Store completes on a loaded system.
+			ptr = ref.Load()
+		}
+		defer b.removeTrackedTimer(chatID, userID, ptr)
 		fn()
 	})
+	ref.Store(timer)
 	b.trackUserTimer(chatID, userID, timer)
-	trackedTimer <- timer
 	return timer
 }
 
@@ -160,9 +194,10 @@ func (b *Bot) Start(ctx context.Context) (err error) {
 	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
 		Error: func(_ *gotgbot.Bot, _ *ext.Context, err error) ext.DispatcherAction {
 			log.Printf("[bot] handler error: %v", err)
+			b.runtimeStats.recordErrorf("handler error: %v", err)
 			return ext.DispatcherActionNoop
 		},
-		MaxRoutines: dispatcherMaxRoutines,
+		MaxRoutines: b.dispatcherMaxRoutines(),
 	})
 
 	updaterErrors := newUpdaterErrorThrottler()
@@ -178,6 +213,7 @@ func (b *Bot) Start(ctx context.Context) (err error) {
 	dispatcher.AddHandler(handlers.NewCommand("reject", b.cmdReject))
 	dispatcher.AddHandler(handlers.NewCommand("unreject", b.cmdUnreject))
 	dispatcher.AddHandler(handlers.NewCommand("resetverify", b.cmdResetAllVerify))
+	dispatcher.AddHandler(handlers.NewCommand("health", b.cmdHealth))
 	dispatcher.AddHandler(handlers.NewCommand("stats", b.cmdStats))
 	dispatcher.AddHandler(handlers.NewCommand("lang", b.cmdLang))
 	dispatcher.AddHandler(handlers.NewCommand("start", b.cmdStart))
@@ -190,6 +226,9 @@ func (b *Bot) Start(ctx context.Context) (err error) {
 	if err := b.restorePendingVerifications(b.Bot); err != nil {
 		return fmt.Errorf("restore pending verifications: %w", err)
 	}
+
+	b.registerShutdownStop(b.cache.startCleanup(runCtx))
+	b.registerShutdownStop(b.startPendingSweeper(runCtx, b.Bot))
 
 	log.Printf("[bot] Starting polling...")
 	err = updater.StartPolling(b.Bot, &ext.PollingOpts{
@@ -204,8 +243,6 @@ func (b *Bot) Start(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-
-	b.registerShutdownStop(b.cache.startCleanup(runCtx))
 
 	log.Printf("[bot] Bot is running. Press Ctrl+C to stop.")
 	var stopUpdaterOnce sync.Once
@@ -228,4 +265,12 @@ func (b *Bot) Start(ctx context.Context) (err error) {
 	stopUpdater()
 	b.stopAllBackgroundTasks()
 	return nil
+}
+
+func (b *Bot) dispatcherMaxRoutines() int {
+	if b == nil || b.Config == nil {
+		cfg := config.BotConfig{}
+		return cfg.GetDispatcherMaxRoutines()
+	}
+	return b.Config.Bot.GetDispatcherMaxRoutines()
 }

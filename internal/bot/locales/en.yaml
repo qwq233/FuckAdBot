@@ -57,7 +57,28 @@ start_help: |-
   /reject &lt;uid&gt; - Reject verification
   /unreject &lt;uid&gt; - Undo a rejection
   /resetverify &lt;uid&gt; - Clear verification state in all chats (super admin only)
-  /stats - Show statistics
+  /health - Show runtime health (bot admins only)
+  /stats - Show runtime diagnostics (bot admins only)
+health_title: Health
+stats_title: Runtime Statistics
+diag_store_mode: Store mode
+diag_uptime: Uptime
+diag_pending_backlog: Pending backlog
+diag_queue_depth: Dual-write queue depth
+diag_recent_errors: Recent errors
+diag_captcha_summary: Captcha success / failure / timeout
+diag_blacklist_words: Blacklist words
+diag_blacklist_scopes: Blacklist scopes
+diag_heap: Heap
+diag_goroutines: Goroutines
+diag_gc_cycles: GC cycles
+diag_last_sweeper: Last sweeper
+diag_last_flush: Last dual-write flush
+diag_last_replay: Last dual-write replay
+diag_last_rebuild: Last dual-write rebuild
+diag_admin_cache_summary: Admin cache hits / misses / errors
+diag_unknown: n/a
+diag_none: (none)
 verify_params_invalid: ❌ Invalid verification parameters
 verify_link_not_yours: ❌ This verification link does not belong to you
 verify_state_read_failed: ❌ Failed to read the verification state. Please try again later

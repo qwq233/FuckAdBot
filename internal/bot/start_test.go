@@ -141,6 +141,7 @@ func TestStartRestoresPendingVerificationsAndCleansBackgroundTasks(t *testing.T)
 	client := &recordingBotClient{}
 	b := newTestBot(t, nil, client)
 	b.Config.Moderation.OriginalMessageTTL = "10ms"
+	b.Config.Bot.PendingSweeperInterval = "10ms"
 
 	updater := newFakePollingUpdater()
 	b.newUpdater = func(dispatcher ext.UpdateDispatcher, _ *ext.UpdaterOpts) pollingUpdater {

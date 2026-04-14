@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Unit tests
+        run: go test ./...
+      - name: Coverage profiles
+        run: |
+          mkdir -p .gocache
+          go test ./cmd/bot -coverprofile=.gocache/cover-cmd-bot.out
+          go test ./internal/store -coverprofile=.gocache/cover-store.out
+          go test ./internal/bot -coverprofile=.gocache/cover-bot.out
+          go test ./internal/config -coverprofile=.gocache/cover-config.out
+          go test ./internal/captcha -coverprofile=.gocache/cover-captcha.out
+          go test ./internal/blacklist -coverprofile=.gocache/cover-blacklist.out
+      - name: Coverage gate
+        run: go run ./cmd/coveragegate .gocache/cover-cmd-bot.out .gocache/cover-store.out .gocache/cover-bot.out .gocache/cover-config.out .gocache/cover-captcha.out .gocache/cover-blacklist.out
+      - name: Smoke loadtest
+        run: go run ./cmd/loadtest -profile smoke -store sqlite

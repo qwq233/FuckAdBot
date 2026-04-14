@@ -43,6 +43,9 @@ func (s *countingPreferenceStore) GetPending(chatID, userID int64) (*storepkg.Pe
 func (s *countingPreferenceStore) ListPendingVerifications() ([]storepkg.PendingVerification, error) {
 	return nil, nil
 }
+func (s *countingPreferenceStore) ReserveVerificationWindow(pending storepkg.PendingVerification, maxWarnings int) (storepkg.VerificationReservationResult, error) {
+	return storepkg.VerificationReservationResult{Created: true}, nil
+}
 func (s *countingPreferenceStore) CreatePendingIfAbsent(pending storepkg.PendingVerification) (bool, *storepkg.PendingVerification, error) {
 	return true, nil, nil
 }

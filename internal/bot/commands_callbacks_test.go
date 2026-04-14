@@ -3,6 +3,7 @@ package bot
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -545,16 +546,25 @@ func TestCmdLangHandlesPromptInvalidStoreFailureAndSuccess(t *testing.T) {
 	})
 }
 
-func TestCmdStatsRendersCountsForPrivateAndGroupChats(t *testing.T) {
+func TestCmdStatsBotAdminOnlyAndRendersRuntimeDetails(t *testing.T) {
 	t.Parallel()
 
-	t.Run("private", func(t *testing.T) {
+	t.Run("bot admin", func(t *testing.T) {
 		t.Parallel()
 
 		client := &recordingBotClient{}
 		b := newTestBot(t, nil, client)
 		b.Blacklist.Add("spam")
-		b.Blacklist.Add("promo")
+		if err := b.Store.SetPending(storepkg.PendingVerification{
+			ChatID:      -100123,
+			UserID:      42,
+			Timestamp:   time.Now().UTC().Unix(),
+			RandomToken: "token-a",
+			ExpireAt:    time.Now().UTC().Add(5 * time.Minute),
+		}); err != nil {
+			t.Fatalf("SetPending() error = %v", err)
+		}
+		b.runtimeStats.recordError("unit test error")
 
 		msg := &gotgbot.Message{
 			Chat: gotgbot.Chat{Id: 7, Type: "private"},
@@ -569,35 +579,33 @@ func TestCmdStatsRendersCountsForPrivateAndGroupChats(t *testing.T) {
 		if len(requests) != 1 {
 			t.Fatalf("sendMessage request count = %d, want 1", len(requests))
 		}
-		if got, want := requestText(requests[0]), tr("en", "stats_private", 2); got != want {
-			t.Fatalf("private stats = %q, want %q", got, want)
+		text := requestText(requests[0])
+		if !strings.Contains(text, "Runtime Statistics") || !strings.Contains(text, "Pending backlog") || !strings.Contains(text, "Recent errors") {
+			t.Fatalf("stats text = %q, want runtime diagnostics output", text)
 		}
 	})
 
-	t.Run("group", func(t *testing.T) {
+	t.Run("group admin is not enough", func(t *testing.T) {
 		t.Parallel()
 
 		client := &recordingBotClient{}
 		b := newTestBot(t, nil, client)
-		b.Blacklist.Add("spam")
-		b.Blacklist.Add("promo")
-		b.Blacklist.AddGroup(-100123, "groupword")
+		client.SetResponder("getChatMember", func(params map[string]any) (json.RawMessage, error) {
+			userID := toInt64(params["user_id"])
+			return json.RawMessage(fmt.Sprintf(`{"status":"administrator","user":{"id":%d,"is_bot":false,"first_name":"Admin"}}`, userID)), nil
+		})
 
 		msg := &gotgbot.Message{
 			Chat: gotgbot.Chat{Id: -100123, Type: "supergroup"},
-			From: &gotgbot.User{Id: 7, LanguageCode: "en"},
+			From: &gotgbot.User{Id: 42, LanguageCode: "en"},
 			Text: "/stats",
 		}
 		if err := b.cmdStats(b.Bot, newMessageContext(b.Bot, msg)); err != nil {
 			t.Fatalf("cmdStats() error = %v", err)
 		}
 
-		requests := client.RequestsByMethod("sendMessage")
-		if len(requests) != 1 {
-			t.Fatalf("sendMessage request count = %d, want 1", len(requests))
-		}
-		if got, want := requestText(requests[0]), tr("en", "stats_group", 2, 1); got != want {
-			t.Fatalf("group stats = %q, want %q", got, want)
+		if got := len(client.RequestsByMethod("sendMessage")); got != 0 {
+			t.Fatalf("sendMessage request count = %d, want 0 for non-bot-admin", got)
 		}
 	})
 }

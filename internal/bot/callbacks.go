@@ -31,7 +31,14 @@ func BuildReminderKeyboard(verifyURL string, chatID, userID int64, userLanguage 
 
 // BuildModerationCallbackData encodes moderation action metadata into callback data.
 func BuildModerationCallbackData(action string, chatID, userID int64) string {
-	return fmt.Sprintf("%s%s:%d:%d", moderationCallbackPrefix, action, chatID, userID)
+	buf := make([]byte, 0, len(moderationCallbackPrefix)+len(action)+2+(2*20))
+	buf = append(buf, moderationCallbackPrefix...)
+	buf = append(buf, action...)
+	buf = append(buf, ':')
+	buf = strconv.AppendInt(buf, chatID, 10)
+	buf = append(buf, ':')
+	buf = strconv.AppendInt(buf, userID, 10)
+	return string(buf)
 }
 
 // ParseModerationCallbackData decodes moderation callback data into action and target IDs.

@@ -176,8 +176,178 @@ token = "token"
 	if cfg.Moderation.MaxWarnings != 3 || cfg.Moderation.ReminderTTL != 30 || cfg.Moderation.VerifyWindow != "5m" || cfg.Moderation.OriginalMessageTTL != "1m" {
 		t.Fatalf("moderation defaults = %+v, want max_warnings=3 reminder_ttl=30 verify_window=5m original_message_ttl=1m", cfg.Moderation)
 	}
-	if cfg.Store.Type != "sqlite" || cfg.Store.SQLitePath != "./data/fuckad.db" {
-		t.Fatalf("store defaults = %+v, want sqlite + default path", cfg.Store)
+	if cfg.Bot.DispatcherMaxRoutines != 16 || cfg.Bot.AdminCacheTTL != "30s" || cfg.Bot.AdminNegativeCacheTTL != "10s" || cfg.Bot.PendingSweeperInterval != "1s" {
+		t.Fatalf("bot defaults = %+v, want dispatcher/admin cache/sweeper defaults", cfg.Bot)
+	}
+	if cfg.Store.Type != "sqlite" || cfg.Store.DataPath != "./data" {
+		t.Fatalf("store defaults = %+v, want sqlite + default data path", cfg.Store)
+	}
+	if got, want := cfg.Store.SQLitePath(), filepath.Join(".", "data", "fuckad.db"); got != want {
+		t.Fatalf("Store.SQLitePath() = %q, want %q", got, want)
+	}
+	if got, want := cfg.Store.DualWriteQueuePath(), filepath.Join(".", "data", "redis-sync-queue.db"); got != want {
+		t.Fatalf("Store.DualWriteQueuePath() = %q, want %q", got, want)
+	}
+}
+
+func TestBotGetterFallbacks(t *testing.T) {
+	t.Parallel()
+
+	botCfg := configpkg.BotConfig{}
+	if got, want := botCfg.GetDispatcherMaxRoutines(), 16; got != want {
+		t.Fatalf("GetDispatcherMaxRoutines() = %d, want %d", got, want)
+	}
+	if got, want := botCfg.GetAdminCacheTTL(), 30*time.Second; got != want {
+		t.Fatalf("GetAdminCacheTTL() = %v, want %v", got, want)
+	}
+	if got, want := botCfg.GetAdminNegativeCacheTTL(), 10*time.Second; got != want {
+		t.Fatalf("GetAdminNegativeCacheTTL() = %v, want %v", got, want)
+	}
+	if got, want := botCfg.GetPendingSweeperInterval(), time.Second; got != want {
+		t.Fatalf("GetPendingSweeperInterval() = %v, want %v", got, want)
+	}
+}
+
+func TestLoadRejectsRemovedTurnstileHardeningKeys(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := strings.TrimSpace(`
+[bot]
+token = "token"
+
+[turnstile]
+read_header_timeout = "bad"
+max_header_bytes = -1
+`)
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := configpkg.Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want unsupported hardening keys error")
+	}
+	if !strings.Contains(err.Error(), "turnstile.read_header_timeout") || !strings.Contains(err.Error(), "turnstile.max_header_bytes") {
+		t.Fatalf("Load() error = %q, want removed key names", err)
+	}
+}
+
+func TestLoadRejectsRedisDualWriteCombination(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := strings.TrimSpace(`
+[bot]
+token = "token"
+
+[store]
+type = "redis"
+dual_write_enabled = true
+redis_addr = "127.0.0.1:6379"
+`)
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := configpkg.Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want invalid dual-write combination")
+	}
+	if !strings.Contains(err.Error(), "dual_write_enabled") {
+		t.Fatalf("Load() error = %q, want dual_write_enabled validation message", err)
+	}
+}
+
+func TestLoadRejectsRedisWithoutAddress(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := strings.TrimSpace(`
+[bot]
+token = "token"
+
+[store]
+type = "redis"
+`)
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := configpkg.Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want missing redis_addr validation error")
+	}
+	if !strings.Contains(err.Error(), "store.redis_addr") {
+		t.Fatalf("Load() error = %q, want redis_addr validation message", err)
+	}
+}
+
+func TestLoadAcceptsDualWriteSQLiteMode(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := strings.TrimSpace(`
+[bot]
+token = "token"
+
+[store]
+type = "sqlite"
+data_path = "./runtime"
+dual_write_enabled = true
+redis_addr = "127.0.0.1:6379"
+`)
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := configpkg.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !cfg.Store.DualWriteEnabled {
+		t.Fatal("DualWriteEnabled = false, want true")
+	}
+	if got, want := cfg.Store.SQLitePath(), filepath.Join(".", "runtime", "fuckad.db"); got != want {
+		t.Fatalf("Store.SQLitePath() = %q, want %q", got, want)
+	}
+	if got, want := cfg.Store.DualWriteQueuePath(), filepath.Join(".", "runtime", "redis-sync-queue.db"); got != want {
+		t.Fatalf("Store.DualWriteQueuePath() = %q, want %q", got, want)
+	}
+}
+
+func TestLoadAcceptsLegacyDualWriteTuningKeysForCompatibility(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := strings.TrimSpace(`
+[bot]
+token = "token"
+
+[store]
+type = "sqlite"
+dual_write_enabled = true
+redis_addr = "127.0.0.1:6379"
+dual_write_flush_interval = "5s"
+dual_write_batch_size = 50
+`)
+
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := configpkg.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !cfg.Store.HasLegacyDualWriteTuning() {
+		t.Fatal("HasLegacyDualWriteTuning() = false, want true")
 	}
 }
 
