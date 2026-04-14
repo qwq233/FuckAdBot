@@ -25,6 +25,7 @@ type hookedStore struct {
 	removeRejectedHook               func(chatID, userID int64) error
 	resetWarningCountHook            func(chatID, userID int64) error
 	getPendingHook                   func(chatID, userID int64) (*storepkg.PendingVerification, error)
+	listPendingVerificationsHook     func() ([]storepkg.PendingVerification, error)
 	reserveVerificationWindowHook    func(pending storepkg.PendingVerification, maxWarnings int) (storepkg.VerificationReservationResult, error)
 	updatePendingMetadataByTokenHook func(pending storepkg.PendingVerification) (bool, error)
 	resolvePendingByTokenHook        func(chatID, userID int64, timestamp int64, randomToken string, action storepkg.PendingAction, maxWarnings int) (storepkg.PendingResolutionResult, error)
@@ -103,6 +104,13 @@ func (s *hookedStore) GetPending(chatID, userID int64) (*storepkg.PendingVerific
 		return s.getPendingHook(chatID, userID)
 	}
 	return s.Store.GetPending(chatID, userID)
+}
+
+func (s *hookedStore) ListPendingVerifications() ([]storepkg.PendingVerification, error) {
+	if s.listPendingVerificationsHook != nil {
+		return s.listPendingVerificationsHook()
+	}
+	return s.Store.ListPendingVerifications()
 }
 
 func (s *hookedStore) ReserveVerificationWindow(pending storepkg.PendingVerification, maxWarnings int) (storepkg.VerificationReservationResult, error) {

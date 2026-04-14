@@ -79,6 +79,7 @@ func (b *Bot) handleVerifiedUser(incoming *moderatedMessage) bool {
 	verified, err := b.Store.IsVerified(incoming.chatID, incoming.user.Id)
 	if err != nil {
 		log.Printf("[bot] store.IsVerified error: %v", err)
+		b.recordInternalFault("store.is_verified", err)
 		return true
 	}
 
@@ -92,6 +93,7 @@ func (b *Bot) handleGroupAdminAutoApproval(bot *gotgbot.Bot, incoming *moderated
 
 	if err := b.approveUser(incoming.chatID, incoming.user.Id); err != nil {
 		log.Printf("[bot] auto-approve group admin error: %v", err)
+		b.recordInternalFault("moderation.auto_approve", err)
 	}
 	return true
 }
@@ -100,6 +102,7 @@ func (b *Bot) handleRejectedUser(bot *gotgbot.Bot, incoming *moderatedMessage) b
 	rejected, err := b.Store.IsRejected(incoming.chatID, incoming.user.Id)
 	if err != nil {
 		log.Printf("[bot] store.IsRejected error: %v", err)
+		b.recordInternalFault("store.is_rejected", err)
 		return true
 	}
 	if !rejected {
@@ -121,6 +124,7 @@ func (b *Bot) handleVerificationRequiredMessage(bot *gotgbot.Bot, incoming *mode
 		reservation, err := b.Store.ReserveVerificationWindow(pending, incoming.maxWarnings)
 		if err != nil {
 			log.Printf("[bot] store.ReserveVerificationWindow error: %v", err)
+			b.recordInternalFault("store.reserve_verification_window", err)
 			return
 		}
 		if reservation.LimitExceeded {
@@ -177,6 +181,7 @@ func (b *Bot) handleExistingPendingReservation(bot *gotgbot.Bot, incoming *moder
 		deleteMessageIfExists(bot, incoming.chatID, incoming.message.MessageId, "extra pending user message")
 		if err := b.deletePendingOriginalMessage(bot, existing, false); err != nil {
 			log.Printf("[bot] delete pending original message during active window error: %v", err)
+			b.recordInternalFault("pending.original_cleanup", err)
 		}
 		return pendingReservationComplete
 	}
@@ -186,11 +191,19 @@ func (b *Bot) handleExistingPendingReservation(bot *gotgbot.Bot, incoming *moder
 
 func (b *Bot) handlePendingStateAfterCreateRace(bot *gotgbot.Bot, incoming *moderatedMessage) pendingReservationOutcome {
 	verified, err := b.Store.IsVerified(incoming.chatID, incoming.user.Id)
+	if err != nil {
+		log.Printf("[bot] store.IsVerified error after pending race: %v", err)
+		b.recordInternalFault("store.is_verified", err)
+	}
 	if err == nil && verified {
 		return pendingReservationComplete
 	}
 
 	rejected, err := b.Store.IsRejected(incoming.chatID, incoming.user.Id)
+	if err != nil {
+		log.Printf("[bot] store.IsRejected error after pending race: %v", err)
+		b.recordInternalFault("store.is_rejected", err)
+	}
 	if err == nil && rejected {
 		deleteMessageIfExists(bot, incoming.chatID, incoming.message.MessageId, "rejected user message after pending race")
 		return pendingReservationComplete
@@ -203,6 +216,7 @@ func (b *Bot) handleExpiredPendingWindow(bot *gotgbot.Bot, incoming *moderatedMe
 	expired, err := b.Store.ResolvePendingByToken(existing.ChatID, existing.UserID, existing.Timestamp, existing.RandomToken, store.PendingActionExpire, incoming.maxWarnings)
 	if err != nil {
 		log.Printf("[bot] resolve expired pending during message handling error: %v", err)
+		b.recordInternalFault("store.resolve_pending_by_token", err)
 		return pendingReservationComplete
 	}
 	if !expired.Matched {
@@ -212,6 +226,7 @@ func (b *Bot) handleExpiredPendingWindow(bot *gotgbot.Bot, incoming *moderatedMe
 	if expired.Pending != nil {
 		if err := b.deletePendingOriginalMessage(bot, expired.Pending, true); err != nil {
 			log.Printf("[bot] delete pending original message after stale expiry error: %v", err)
+			b.recordInternalFault("pending.original_cleanup", err)
 		}
 	}
 
@@ -285,6 +300,7 @@ func (b *Bot) persistVerificationReminder(bot *gotgbot.Bot, incoming *moderatedM
 	updated, err := b.Store.UpdatePendingMetadataByToken(pending)
 	if err != nil {
 		log.Printf("[bot] store.UpdatePendingMetadataByToken error: %v", err)
+		b.recordInternalFault("store.update_pending_metadata", err)
 		deleteMessageIfExists(bot, incoming.chatID, reminderMsg.MessageId, "verification reminder after pending update failure")
 		b.cancelPendingVerification(pending, incoming.maxWarnings, "metadata update failure")
 		return false

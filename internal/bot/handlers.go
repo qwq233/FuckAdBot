@@ -39,6 +39,7 @@ func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, pending store.PendingVerif
 	)
 	if err != nil {
 		log.Printf("[bot] resolve pending expiry error: %v", err)
+		b.recordInternalFault("store.resolve_pending_by_token", err)
 		return
 	}
 	if !result.Matched {
@@ -48,6 +49,7 @@ func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, pending store.PendingVerif
 	if result.Pending != nil {
 		if err := b.deletePendingOriginalMessage(bot, result.Pending, true); err != nil {
 			log.Printf("[bot] delete pending original message on expiry error: %v", err)
+			b.recordInternalFault("pending.original_cleanup", err)
 		}
 	}
 
@@ -75,6 +77,7 @@ func (b *Bot) scheduleOriginalMessageDeletion(bot *gotgbot.Bot, pending store.Pe
 	if delay <= 0 {
 		if err := b.deletePendingOriginalMessage(bot, &pending, false); err != nil {
 			log.Printf("[bot] delete pending original message after ttl error: %v", err)
+			b.recordInternalFault("pending.original_cleanup", err)
 		}
 		return
 	}
@@ -82,6 +85,7 @@ func (b *Bot) scheduleOriginalMessageDeletion(bot *gotgbot.Bot, pending store.Pe
 	b.scheduleUserTimer(pending.ChatID, pending.UserID, delay, func() {
 		if err := b.deletePendingOriginalMessage(bot, &pending, false); err != nil {
 			log.Printf("[bot] delete pending original message after ttl error: %v", err)
+			b.recordInternalFault("pending.original_cleanup", err)
 		}
 	})
 }

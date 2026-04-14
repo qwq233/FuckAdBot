@@ -48,6 +48,7 @@ func (b *Bot) runPendingSweeperTick(bot *gotgbot.Bot) {
 	pendingVerifications, err := b.Store.ListPendingVerifications()
 	if err != nil {
 		log.Printf("[bot] pending sweeper list error: %v", err)
+		b.recordInternalFault("store.list_pending_verifications", err)
 		b.runtimeStats.recordErrorf("pending sweeper list: %v", err)
 		b.runtimeStats.recordSweeperRun(startedAt, time.Since(startedAt), 0, 0)
 		return
@@ -66,6 +67,7 @@ func (b *Bot) runPendingSweeperTick(bot *gotgbot.Bot) {
 		if pending.OriginalMessageID != 0 {
 			if err := b.deletePendingOriginalMessage(bot, &pending, false); err != nil {
 				log.Printf("[bot] pending sweeper original message cleanup error: %v", err)
+				b.recordInternalFault("sweeper.original_cleanup", err)
 				b.runtimeStats.recordErrorf("pending sweeper original cleanup chat=%d user=%d: %v", pending.ChatID, pending.UserID, err)
 			}
 		}

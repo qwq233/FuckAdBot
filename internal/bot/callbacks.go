@@ -143,6 +143,7 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 	case "a":
 		if err := b.approveUser(chatID, userID); err != nil {
 			log.Printf("[bot] approveUser callback error: %v", err)
+			b.recordInternalFault("moderation.callback_approve", err)
 			_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
 				Text:      tr(requestLanguage, "callback_approve_failed"),
 				ShowAlert: true,
@@ -155,6 +156,7 @@ func (b *Bot) handleModerationCallback(bot *gotgbot.Bot, ctx *ext.Context) error
 	case "r":
 		if err := b.rejectUser(chatID, userID); err != nil {
 			log.Printf("[bot] rejectUser callback error: %v", err)
+			b.recordInternalFault("moderation.callback_reject", err)
 			_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
 				Text:      tr(requestLanguage, "callback_reject_failed"),
 				ShowAlert: true,
@@ -208,6 +210,7 @@ func (b *Bot) handleLanguagePreferenceCallback(bot *gotgbot.Bot, ctx *ext.Contex
 	selectedLanguage, changed, err := b.applyUserLanguagePreference(cq.From.Id, language)
 	if err != nil {
 		log.Printf("[bot] store.SetUserLanguagePreference error: %v", err)
+		b.recordInternalFault("store.set_user_language_preference", err)
 		_, _ = cq.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{
 			Text:      tr(requestLanguage, "lang_update_failed"),
 			ShowAlert: true,

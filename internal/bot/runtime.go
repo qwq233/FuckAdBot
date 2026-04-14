@@ -30,18 +30,28 @@ func defaultUpdaterFactory(dispatcher ext.UpdateDispatcher, opts *ext.UpdaterOpt
 }
 
 func (b *Bot) ensureRuntimeState() {
-	if b.timers == nil {
-		b.timers = make(map[timerKey][]*time.Timer)
+	if b == nil {
+		return
 	}
-	if b.userTimers == nil {
-		b.userTimers = make(map[int64]map[timerKey]struct{})
-	}
-	if b.backgroundTimers == nil {
-		b.backgroundTimers = make(map[*time.Timer]struct{})
-	}
-	if b.newUpdater == nil {
-		b.newUpdater = defaultUpdaterFactory
-	}
+
+	b.runtimeOnce.Do(func() {
+		if b.timers == nil {
+			b.timers = make(map[timerKey][]*time.Timer)
+		}
+		if b.userTimers == nil {
+			b.userTimers = make(map[int64]map[timerKey]struct{})
+		}
+		if b.backgroundTimers == nil {
+			b.backgroundTimers = make(map[*time.Timer]struct{})
+		}
+		if b.newUpdater == nil {
+			b.newUpdater = defaultUpdaterFactory
+		}
+		if b.fatalErrCh == nil {
+			b.fatalErrCh = make(chan error, 1)
+		}
+	})
+
 	b.runtimeStats.ensureInitialized()
 }
 

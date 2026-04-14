@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +18,13 @@ import (
 )
 
 type fakeAppBot struct {
-	started   chan struct{}
-	startErr  error
-	stopCause error
-	captcha   botpkg.VerificationURLProvider
+	started        chan struct{}
+	startErr       error
+	stopCause      error
+	captcha        botpkg.VerificationURLProvider
+	errCh          chan error
+	tripOnRecord   bool
+	recordedFaults []string
 }
 
 func (b *fakeAppBot) Start(ctx context.Context) error {
@@ -40,6 +44,30 @@ func (b *fakeAppBot) HandleVerificationSuccess(token captcha.VerifiedToken) {}
 
 func (b *fakeAppBot) SetCaptcha(provider botpkg.VerificationURLProvider) {
 	b.captcha = provider
+}
+
+func (b *fakeAppBot) Errors() <-chan error {
+	if b.errCh == nil {
+		b.errCh = make(chan error, 1)
+	}
+	return b.errCh
+}
+
+func (b *fakeAppBot) RecordInternalFault(component string, err error) {
+	if err == nil {
+		return
+	}
+
+	b.recordedFaults = append(b.recordedFaults, fmt.Sprintf("%s: %v", component, err))
+	if !b.tripOnRecord {
+		return
+	}
+	b.Errors()
+
+	select {
+	case b.errCh <- fmt.Errorf("%s: %w", component, err):
+	default:
+	}
 }
 
 type fakeCaptchaService struct {
@@ -113,7 +141,7 @@ func TestRunWithDepsCancelsBotAndShutsDownCaptchaOnServeFailure(t *testing.T) {
 	configPath := writeConfigFile(t, true)
 	deps := defaultTestDeps()
 
-	fakeBot := &fakeAppBot{started: make(chan struct{})}
+	fakeBot := &fakeAppBot{started: make(chan struct{}), tripOnRecord: true, errCh: make(chan error, 1)}
 	fakeCaptcha := &fakeCaptchaService{errCh: make(chan error, 1)}
 
 	deps.newBot = func(cfg *config.Config, st store.Store, bl *blacklist.Blacklist) (appBot, error) {
@@ -132,8 +160,8 @@ func TestRunWithDepsCancelsBotAndShutsDownCaptchaOnServeFailure(t *testing.T) {
 	fakeCaptcha.errCh <- errors.New("serve failed")
 
 	err := <-errCh
-	if err == nil || !strings.Contains(err.Error(), "captcha server stopped unexpectedly") {
-		t.Fatalf("runWithDeps() error = %v, want captcha serve failure", err)
+	if err == nil || !strings.Contains(err.Error(), "bot stopped unexpectedly") {
+		t.Fatalf("runWithDeps() error = %v, want bot fatal propagated from captcha serve failure", err)
 	}
 	if fakeCaptcha.startCalls != 1 {
 		t.Fatalf("captcha Start() calls = %d, want 1", fakeCaptcha.startCalls)
@@ -144,8 +172,11 @@ func TestRunWithDepsCancelsBotAndShutsDownCaptchaOnServeFailure(t *testing.T) {
 	if fakeBot.captcha != fakeCaptcha {
 		t.Fatal("bot captcha provider was not attached")
 	}
-	if fakeBot.stopCause == nil || !strings.Contains(fakeBot.stopCause.Error(), "captcha server stopped unexpectedly") {
-		t.Fatalf("bot stop cause = %v, want captcha failure cause", fakeBot.stopCause)
+	if len(fakeBot.recordedFaults) != 1 || !strings.Contains(fakeBot.recordedFaults[0], "captcha.server: serve failed") {
+		t.Fatalf("recorded faults = %v, want captcha.server fuse input", fakeBot.recordedFaults)
+	}
+	if fakeBot.stopCause == nil || !strings.Contains(fakeBot.stopCause.Error(), "bot stopped unexpectedly") || !strings.Contains(fakeBot.stopCause.Error(), "captcha.server: serve failed") {
+		t.Fatalf("bot stop cause = %v, want wrapped bot fatal cause", fakeBot.stopCause)
 	}
 }
 

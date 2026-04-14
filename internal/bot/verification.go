@@ -19,6 +19,7 @@ func (b *Bot) HandleVerificationSuccess(token captcha.VerifiedToken) {
 	)
 	if err != nil {
 		log.Printf("[bot] resolve verification success error: %v", err)
+		b.recordInternalFault("store.resolve_pending_by_token", err)
 		return
 	}
 	if !result.Matched {

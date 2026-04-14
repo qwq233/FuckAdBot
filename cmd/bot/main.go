@@ -21,6 +21,8 @@ type appBot interface {
 	Start(ctx context.Context) error
 	HandleVerificationSuccess(token captcha.VerifiedToken)
 	SetCaptcha(provider bot.VerificationURLProvider)
+	Errors() <-chan error
+	RecordInternalFault(component string, err error)
 }
 
 type captchaService interface {
@@ -97,12 +99,22 @@ func runWithDeps(ctx context.Context, configPath string, deps appDeps) error {
 	appCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
+	go func() {
+		select {
+		case err := <-b.Errors():
+			if err != nil {
+				cancel(fmt.Errorf("bot stopped unexpectedly: %w", err))
+			}
+		case <-appCtx.Done():
+		}
+	}()
+
 	if reporter, ok := st.(store.ErrorReporter); ok {
 		go func() {
 			select {
 			case err := <-reporter.Errors():
 				if err != nil {
-					cancel(fmt.Errorf("store stopped unexpectedly: %w", err))
+					b.RecordInternalFault("store.runtime", err)
 				}
 			case <-appCtx.Done():
 			}
@@ -125,7 +137,7 @@ func runWithDeps(ctx context.Context, configPath string, deps appDeps) error {
 			select {
 			case err := <-cs.Errors():
 				if err != nil {
-					cancel(fmt.Errorf("captcha server stopped unexpectedly: %w", err))
+					b.RecordInternalFault("captcha.server", err)
 				}
 			case <-appCtx.Done():
 			}

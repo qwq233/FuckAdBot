@@ -197,6 +197,7 @@ func (b *Bot) cmdAddBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	if err := b.Store.AddBlacklistWord(scopeChatID, word, strconv.FormatInt(msg.From.Id, 10)); err != nil {
 		log.Printf("[bot] store.AddBlacklistWord error: %v", err)
+		b.recordInternalFault("store.add_blacklist_word", err)
 		if isPrivate {
 			b.Blacklist.Remove(word)
 		} else {
@@ -269,6 +270,7 @@ func (b *Bot) cmdDelBlocklist(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	if err := b.Store.RemoveBlacklistWord(scopeChatID, word); err != nil {
 		log.Printf("[bot] store.RemoveBlacklistWord error: %v", err)
+		b.recordInternalFault("store.remove_blacklist_word", err)
 		if isPrivate {
 			b.Blacklist.Add(word)
 		} else {
@@ -363,6 +365,7 @@ func (b *Bot) cmdApprove(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	if err := b.approveUser(chatID, userID); err != nil {
 		log.Printf("[bot] approveUser error: %v", err)
+		b.recordInternalFault("moderation.manual_approve", err)
 		bot.SendMessage(chatID, tr(requestLanguage, "approve_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
@@ -402,6 +405,7 @@ func (b *Bot) cmdResetAllVerify(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	if err := b.Store.ClearUserVerificationStateEverywhere(userID); err != nil {
 		log.Printf("[bot] ClearUserVerificationStateEverywhere error: %v", err)
+		b.recordInternalFault("store.clear_user_verification_state", err)
 		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "resetverify_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
@@ -443,6 +447,7 @@ func (b *Bot) cmdReject(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	if err := b.rejectUser(chatID, userID); err != nil {
 		log.Printf("[bot] rejectUser error: %v", err)
+		b.recordInternalFault("moderation.manual_reject", err)
 		bot.SendMessage(chatID, tr(requestLanguage, "reject_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
@@ -489,6 +494,7 @@ func (b *Bot) cmdUnreject(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	if err := b.unrejectUser(chatID, userID); err != nil {
 		log.Printf("[bot] unrejectUser error: %v", err)
+		b.recordInternalFault("moderation.manual_unreject", err)
 		bot.SendMessage(chatID, tr(requestLanguage, "unreject_failed"), &gotgbot.SendMessageOpts{
 			MessageThreadId: msg.MessageThreadId,
 		})
@@ -535,6 +541,7 @@ func (b *Bot) cmdLang(bot *gotgbot.Bot, ctx *ext.Context) error {
 	selectedLanguage, changed, err := b.applyUserLanguagePreference(msg.From.Id, args[1])
 	if err != nil {
 		log.Printf("[bot] store.SetUserLanguagePreference error: %v", err)
+		b.recordInternalFault("store.set_user_language_preference", err)
 		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "lang_update_failed"), nil)
 		return nil
 	}
@@ -587,6 +594,7 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 	pending, err := b.Store.GetPending(chatID, userID)
 	if err != nil {
 		log.Printf("[bot] store.GetPending error in /start: %v", err)
+		b.recordInternalFault("store.get_pending", err)
 		bot.SendMessage(msg.Chat.Id, tr(requestLanguage, "verify_state_read_failed"), nil)
 		return nil
 	}
@@ -600,6 +608,7 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 		log.Printf("[bot] blacklist hit during /start verification: user=%d word=%q in chat=%d", userID, matched, chatID)
 		if _, err := b.Store.ResolvePendingByToken(chatID, userID, pending.Timestamp, pending.RandomToken, store.PendingActionCancel, b.Config.Moderation.MaxWarnings); err != nil {
 			log.Printf("[bot] resolve pending error after blacklist hit in /start: %v", err)
+			b.recordInternalFault("store.resolve_pending_by_token", err)
 		}
 		if pending.OriginalMessageID != 0 {
 			deleteMessageIfExists(bot, chatID, pending.OriginalMessageID, "pending original after /start blacklist hit")
@@ -642,6 +651,7 @@ func (b *Bot) handleVerificationStart(bot *gotgbot.Bot, msg *gotgbot.Message, pa
 	updated, err := b.Store.UpdatePendingMetadataByToken(*pending)
 	if err != nil {
 		log.Printf("[bot] store.UpdatePendingMetadataByToken error after private verification message: %v", err)
+		b.recordInternalFault("store.update_pending_metadata", err)
 		deleteMessageIfExists(bot, msg.Chat.Id, privateVerificationMsg.MessageId, "private verification after store update failure")
 		return nil
 	}

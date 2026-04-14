@@ -45,7 +45,10 @@ type Bot struct {
 	backgroundTimers map[*time.Timer]struct{}
 	shutdownStops    []func()
 	newUpdater       updaterFactory
+	runtimeOnce      sync.Once
 	runtimeStats     botRuntimeStats
+	internalFaults   internalFaultMonitor
+	fatalErrCh       chan error
 }
 
 func New(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs VerificationURLProvider) (*Bot, error) {
