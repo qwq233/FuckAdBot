@@ -47,6 +47,28 @@ func (s *stubStore) GetPending(chatID, userID int64) (*store.PendingVerification
 
 func (s *stubStore) ListPendingVerifications() ([]store.PendingVerification, error) { return nil, nil }
 
+func (s *stubStore) ReserveVerificationWindow(pending store.PendingVerification, maxWarnings int) (store.VerificationReservationResult, error) {
+	result := store.VerificationReservationResult{}
+
+	warningCount, err := s.GetWarningCount(pending.ChatID, pending.UserID)
+	if err != nil {
+		return result, err
+	}
+	result.WarningCount = warningCount
+	if warningCount >= maxWarnings {
+		result.LimitExceeded = true
+		return result, nil
+	}
+
+	created, existing, err := s.CreatePendingIfAbsent(pending)
+	if err != nil {
+		return result, err
+	}
+	result.Created = created
+	result.Existing = existing
+	return result, nil
+}
+
 func (s *stubStore) CreatePendingIfAbsent(pending store.PendingVerification) (bool, *store.PendingVerification, error) {
 	return true, nil, nil
 }
