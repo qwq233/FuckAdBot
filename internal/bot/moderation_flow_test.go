@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -320,6 +321,38 @@ func TestHandleExistingPendingReservationDeletesIncomingAndOldOriginalForActiveW
 	}
 	if got := len(client.RequestsByMethod("deleteMessage")); got != 2 {
 		t.Fatalf("deleteMessage request count = %d, want 2", got)
+	}
+}
+
+func TestHandleVerifiedUserReturnsFalseForUnverifiedUsers(t *testing.T) {
+	t.Parallel()
+
+	b := newModerationFlowBot(t, &moderationFlowStoreStub{})
+	incoming := &moderatedMessage{
+		chatID: -100123,
+		user:   &gotgbot.User{Id: 42},
+	}
+
+	if b.handleVerifiedUser(incoming) {
+		t.Fatal("handleVerifiedUser() = true, want false for an unverified user")
+	}
+}
+
+func TestHandleGroupAdminAutoApprovalReturnsFalseForNonAdmins(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingBotClient{}
+	client.SetResponder("getChatMember", func(params map[string]any) (json.RawMessage, error) {
+		return json.RawMessage(`{"status":"member","user":{"id":42,"is_bot":false,"first_name":"User"}}`), nil
+	})
+	b := newTestBot(t, &moderationFlowStoreStub{}, client)
+	incoming := &moderatedMessage{
+		chatID: -100123,
+		user:   &gotgbot.User{Id: 42},
+	}
+
+	if b.handleGroupAdminAutoApproval(b.Bot, incoming) {
+		t.Fatal("handleGroupAdminAutoApproval() = true, want false for a non-admin user")
 	}
 }
 

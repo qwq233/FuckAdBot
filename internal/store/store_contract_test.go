@@ -15,8 +15,9 @@ import (
 )
 
 type storeFactory struct {
-	name string
-	new  func(t *testing.T) storepkg.Store
+	name   string
+	new    func(t *testing.T) storepkg.Store
+	settle func(t *testing.T, st storepkg.Store)
 }
 
 func contractStoreFactories() []storeFactory {
@@ -35,6 +36,7 @@ func contractStoreFactories() []storeFactory {
 				})
 				return st
 			},
+			settle: func(t *testing.T, st storepkg.Store) {},
 		},
 		{
 			name: "redis",
@@ -59,6 +61,53 @@ func contractStoreFactories() []storeFactory {
 				})
 				return st
 			},
+			settle: func(t *testing.T, st storepkg.Store) {},
+		},
+		{
+			name: "dual-write",
+			new: func(t *testing.T) storepkg.Store {
+				t.Helper()
+
+				redisSrv := miniredis.RunT(t)
+				cfg := configpkg.StoreConfig{
+					Type:             "sqlite",
+					DataPath:         t.TempDir(),
+					RedisAddr:        redisSrv.Addr(),
+					RedisKeyPrefix:   fmt.Sprintf("contract-dual:%s:", t.Name()),
+					DualWriteEnabled: true,
+				}
+				cfg.Normalize()
+
+				st, err := storepkg.NewDualWriteStore(cfg)
+				if err != nil {
+					t.Fatalf("NewDualWriteStore() error = %v", err)
+				}
+				t.Cleanup(func() {
+					_ = st.Close()
+				})
+				return st
+			},
+			settle: func(t *testing.T, st storepkg.Store) {
+				t.Helper()
+
+				reporter, ok := st.(storepkg.RuntimeStatsReporter)
+				if !ok {
+					return
+				}
+
+				time.Sleep(60 * time.Millisecond)
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					stats := reporter.RuntimeStats()
+					if stats.QueueDepth == 0 && stats.LastFlushError == "" {
+						return
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("dual-write runtime stats did not settle: %+v", stats)
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			},
 		},
 	}
 }
@@ -72,12 +121,16 @@ func TestStoreContractPreferencesAndStatuses(t *testing.T) {
 			t.Parallel()
 
 			st := factory.new(t)
+			settle := func() {
+				factory.settle(t, st)
+			}
 			chatID := int64(-100123)
 			userID := int64(42)
 
 			if err := st.SetUserLanguagePreference(userID, "en"); err != nil {
 				t.Fatalf("SetUserLanguagePreference() error = %v", err)
 			}
+			settle()
 			language, err := st.GetUserLanguagePreference(userID)
 			if err != nil {
 				t.Fatalf("GetUserLanguagePreference() error = %v", err)
@@ -89,6 +142,7 @@ func TestStoreContractPreferencesAndStatuses(t *testing.T) {
 			if err := st.SetVerified(chatID, userID); err != nil {
 				t.Fatalf("SetVerified() error = %v", err)
 			}
+			settle()
 			verified, err := st.IsVerified(chatID, userID)
 			if err != nil {
 				t.Fatalf("IsVerified() error = %v", err)
@@ -100,6 +154,7 @@ func TestStoreContractPreferencesAndStatuses(t *testing.T) {
 			if err := st.SetRejected(chatID, userID); err != nil {
 				t.Fatalf("SetRejected() error = %v", err)
 			}
+			settle()
 			rejected, err := st.IsRejected(chatID, userID)
 			if err != nil {
 				t.Fatalf("IsRejected() error = %v", err)
@@ -111,6 +166,7 @@ func TestStoreContractPreferencesAndStatuses(t *testing.T) {
 			if err := st.RemoveRejected(chatID, userID); err != nil {
 				t.Fatalf("RemoveRejected() error = %v", err)
 			}
+			settle()
 			rejected, err = st.IsRejected(chatID, userID)
 			if err != nil {
 				t.Fatalf("IsRejected() after remove error = %v", err)
@@ -131,6 +187,9 @@ func TestStoreContractPendingLifecycle(t *testing.T) {
 			t.Parallel()
 
 			st := factory.new(t)
+			settle := func() {
+				factory.settle(t, st)
+			}
 			base := time.Now().UTC().Truncate(time.Second)
 			pending := storepkg.PendingVerification{
 				ChatID:            -100321,
@@ -150,6 +209,7 @@ func TestStoreContractPendingLifecycle(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreatePendingIfAbsent() error = %v", err)
 			}
+			settle()
 			if !created || existing != nil {
 				t.Fatalf("CreatePendingIfAbsent() = (%v, %+v), want (true, nil)", created, existing)
 			}
@@ -174,6 +234,7 @@ func TestStoreContractPendingLifecycle(t *testing.T) {
 			if err != nil {
 				t.Fatalf("UpdatePendingMetadataByToken() error = %v", err)
 			}
+			settle()
 			if !updated {
 				t.Fatal("UpdatePendingMetadataByToken() = false, want true")
 			}
@@ -201,6 +262,7 @@ func TestStoreContractPendingLifecycle(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ResolvePendingByToken(approve) error = %v", err)
 			}
+			settle()
 			if !approved.Matched || !approved.Verified {
 				t.Fatalf("ResolvePendingByToken(approve) = %+v, want matched verified result", approved)
 			}
@@ -219,11 +281,13 @@ func TestStoreContractPendingLifecycle(t *testing.T) {
 			if err := st.SetPending(rejectedPending); err != nil {
 				t.Fatalf("SetPending(reject) error = %v", err)
 			}
+			settle()
 
 			rejectedResult, err := st.ResolvePendingByToken(rejectedPending.ChatID, rejectedPending.UserID, rejectedPending.Timestamp, rejectedPending.RandomToken, storepkg.PendingActionReject, 3)
 			if err != nil {
 				t.Fatalf("ResolvePendingByToken(reject) error = %v", err)
 			}
+			settle()
 			if !rejectedResult.Matched || !rejectedResult.Rejected {
 				t.Fatalf("ResolvePendingByToken(reject) = %+v, want matched rejected result", rejectedResult)
 			}
@@ -234,11 +298,13 @@ func TestStoreContractPendingLifecycle(t *testing.T) {
 			if err := st.SetPending(expiredPending); err != nil {
 				t.Fatalf("SetPending(expire) error = %v", err)
 			}
+			settle()
 
 			expiredResult, err := st.ResolvePendingByToken(expiredPending.ChatID, expiredPending.UserID, expiredPending.Timestamp, expiredPending.RandomToken, storepkg.PendingActionExpire, 2)
 			if err != nil {
 				t.Fatalf("ResolvePendingByToken(expire) error = %v", err)
 			}
+			settle()
 			if !expiredResult.Matched || expiredResult.WarningCount != 1 || expiredResult.ShouldBan {
 				t.Fatalf("ResolvePendingByToken(expire) = %+v, want warning_count=1 and should_ban=false", expiredResult)
 			}
@@ -249,11 +315,13 @@ func TestStoreContractPendingLifecycle(t *testing.T) {
 			if err := st.SetPending(canceledPending); err != nil {
 				t.Fatalf("SetPending(cancel) error = %v", err)
 			}
+			settle()
 
 			canceledResult, err := st.ResolvePendingByToken(canceledPending.ChatID, canceledPending.UserID, canceledPending.Timestamp, canceledPending.RandomToken, storepkg.PendingActionCancel, 3)
 			if err != nil {
 				t.Fatalf("ResolvePendingByToken(cancel) error = %v", err)
 			}
+			settle()
 			if !canceledResult.Matched {
 				t.Fatalf("ResolvePendingByToken(cancel) = %+v, want matched result", canceledResult)
 			}
@@ -278,6 +346,9 @@ func TestStoreContractReserveVerificationWindow(t *testing.T) {
 			t.Parallel()
 
 			st := factory.new(t)
+			settle := func() {
+				factory.settle(t, st)
+			}
 			base := time.Now().UTC().Truncate(time.Second)
 			pending := storepkg.PendingVerification{
 				ChatID:       -100321,
@@ -292,6 +363,7 @@ func TestStoreContractReserveVerificationWindow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReserveVerificationWindow(create) error = %v", err)
 			}
+			settle()
 			if !reservation.Created || reservation.Existing != nil || reservation.LimitExceeded || reservation.WarningCount != 0 {
 				t.Fatalf("ReserveVerificationWindow(create) = %+v, want created result", reservation)
 			}
@@ -319,11 +391,13 @@ func TestStoreContractReserveVerificationWindow(t *testing.T) {
 			if _, err := st.IncrWarningCount(limitedPending.ChatID, limitedPending.UserID); err != nil {
 				t.Fatalf("IncrWarningCount(limit third) error = %v", err)
 			}
+			settle()
 
 			reservation, err = st.ReserveVerificationWindow(limitedPending, 3)
 			if err != nil {
 				t.Fatalf("ReserveVerificationWindow(limit) error = %v", err)
 			}
+			settle()
 			if !reservation.LimitExceeded || reservation.Created || reservation.Existing != nil || reservation.WarningCount != 3 {
 				t.Fatalf("ReserveVerificationWindow(limit) = %+v, want limit-exceeded warning_count=3", reservation)
 			}
@@ -348,6 +422,9 @@ func TestStoreContractWarningsBlacklistAndClearEverywhere(t *testing.T) {
 			t.Parallel()
 
 			st := factory.new(t)
+			settle := func() {
+				factory.settle(t, st)
+			}
 			userID := int64(42)
 			chatA := int64(-100111)
 			chatB := int64(-100222)
@@ -356,6 +433,7 @@ func TestStoreContractWarningsBlacklistAndClearEverywhere(t *testing.T) {
 			if err != nil {
 				t.Fatalf("IncrWarningCount() error = %v", err)
 			}
+			settle()
 			if count != 1 {
 				t.Fatalf("IncrWarningCount() = %d, want 1", count)
 			}
@@ -376,6 +454,7 @@ func TestStoreContractWarningsBlacklistAndClearEverywhere(t *testing.T) {
 			if err := st.AddBlacklistWord(chatA, "group-b", "admin"); err != nil {
 				t.Fatalf("AddBlacklistWord(group-b) error = %v", err)
 			}
+			settle()
 
 			allWords, err := st.GetAllBlacklistWords()
 			if err != nil {
@@ -419,10 +498,12 @@ func TestStoreContractWarningsBlacklistAndClearEverywhere(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("SetPending(chatB) error = %v", err)
 			}
+			settle()
 
 			if err := st.ClearUserVerificationStateEverywhere(userID); err != nil {
 				t.Fatalf("ClearUserVerificationStateEverywhere() error = %v", err)
 			}
+			settle()
 
 			verified, err := st.IsVerified(chatA, userID)
 			if err != nil {

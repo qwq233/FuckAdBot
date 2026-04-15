@@ -345,6 +345,75 @@ func TestCmdRejectUsesReplyTargetAndSendsConfirmation(t *testing.T) {
 	}
 }
 
+func TestCmdApproveSuccessIgnoresConfirmationSendErrors(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingBotClient{}
+	client.SetError("sendMessage", errors.New("send failed"))
+	b := newTestBot(t, nil, client)
+	if err := b.Store.SetRejected(-100123, 42); err != nil {
+		t.Fatalf("SetRejected() error = %v", err)
+	}
+
+	msg := &gotgbot.Message{
+		Chat: gotgbot.Chat{Id: -100123, Type: "supergroup"},
+		From: &gotgbot.User{Id: 7, LanguageCode: "en"},
+		Text: "/approve 42",
+	}
+	if err := b.cmdApprove(b.Bot, newMessageContext(b.Bot, msg)); err != nil {
+		t.Fatalf("cmdApprove() error = %v", err)
+	}
+
+	verified, err := b.Store.IsVerified(-100123, 42)
+	if err != nil {
+		t.Fatalf("IsVerified() error = %v", err)
+	}
+	if !verified {
+		t.Fatal("IsVerified() = false, want true after /approve even when confirmation send fails")
+	}
+	if got := len(client.RequestsByMethod("deleteMessage")); got != 0 {
+		t.Fatalf("deleteMessage request count = %d, want 0 when confirmation send fails", got)
+	}
+}
+
+func TestCmdRejectSuccessIgnoresConfirmationSendErrors(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingBotClient{}
+	client.SetError("sendMessage", errors.New("send failed"))
+	b := newTestBot(t, nil, client)
+	if err := b.Store.SetPending(storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-a",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	msg := &gotgbot.Message{
+		Chat: gotgbot.Chat{Id: -100123, Type: "supergroup"},
+		From: &gotgbot.User{Id: 7, LanguageCode: "en"},
+		Text: "/reject 42",
+	}
+	if err := b.cmdReject(b.Bot, newMessageContext(b.Bot, msg)); err != nil {
+		t.Fatalf("cmdReject() error = %v", err)
+	}
+
+	rejected, err := b.Store.IsRejected(-100123, 42)
+	if err != nil {
+		t.Fatalf("IsRejected() error = %v", err)
+	}
+	if !rejected {
+		t.Fatal("IsRejected() = false, want true after /reject even when confirmation send fails")
+	}
+	if got := len(client.RequestsByMethod("deleteMessage")); got != 0 {
+		t.Fatalf("deleteMessage request count = %d, want 0 when confirmation send fails", got)
+	}
+}
+
 func TestCmdUnrejectClearsRejectedStateAndWarnings(t *testing.T) {
 	t.Parallel()
 
@@ -428,6 +497,30 @@ func TestCmdResetAllVerifyClearsStateAndCancelsTimers(t *testing.T) {
 	}
 	if len(b.timers) != 0 {
 		t.Fatalf("timers map = %+v, want empty after /resetverify", b.timers)
+	}
+}
+
+func TestCmdResetAllVerifyShowsUsageWhenTargetIsMissing(t *testing.T) {
+	t.Parallel()
+
+	client := &recordingBotClient{}
+	b := newTestBot(t, nil, client)
+
+	msg := &gotgbot.Message{
+		Chat: gotgbot.Chat{Id: 7, Type: "private"},
+		From: &gotgbot.User{Id: 7, LanguageCode: "en"},
+		Text: "/resetverify",
+	}
+	if err := b.cmdResetAllVerify(b.Bot, newMessageContext(b.Bot, msg)); err != nil {
+		t.Fatalf("cmdResetAllVerify() error = %v", err)
+	}
+
+	requests := client.RequestsByMethod("sendMessage")
+	if len(requests) != 1 {
+		t.Fatalf("sendMessage request count = %d, want 1", len(requests))
+	}
+	if got, want := requestText(requests[0]), tr("en", "resetverify_usage"); got != want {
+		t.Fatalf("usage text = %q, want %q", got, want)
 	}
 }
 

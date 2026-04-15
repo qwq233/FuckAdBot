@@ -93,8 +93,6 @@ func (q *dualWriteQueue) migrate() error {
 			created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
 			updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_redis_sync_queue_id ON redis_sync_queue(id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_redis_sync_queue_kind_dedupe ON redis_sync_queue(kind, dedupe_key)`,
 	}
 
 	for _, query := range queries {
@@ -105,6 +103,15 @@ func (q *dualWriteQueue) migrate() error {
 
 	if err := q.migrateLegacySchema(); err != nil {
 		return err
+	}
+
+	for _, query := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_redis_sync_queue_id ON redis_sync_queue(id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_redis_sync_queue_kind_dedupe ON redis_sync_queue(kind, dedupe_key)`,
+	} {
+		if _, err := q.db.Exec(query); err != nil {
+			return fmt.Errorf("migrate dual-write queue indexes: %w", err)
+		}
 	}
 
 	return nil

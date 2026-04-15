@@ -601,6 +601,48 @@ func TestApproveUserSetsVerifiedWhenNoPending(t *testing.T) {
 	}
 }
 
+func TestApproveUserFallsBackWhenPendingResolutionDoesNotMatch(t *testing.T) {
+	t.Parallel()
+
+	base := mustNewSQLiteStore(t)
+	b := newTestBot(t, &hookedStore{
+		Store: base,
+		resolvePendingByTokenHook: func(chatID, userID int64, timestamp int64, randomToken string, action storepkg.PendingAction, maxWarnings int) (storepkg.PendingResolutionResult, error) {
+			return storepkg.PendingResolutionResult{Action: action}, nil
+		},
+	}, &recordingBotClient{})
+
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "token-fallback",
+		ExpireAt:     time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second),
+	}
+	if err := b.Store.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+	if err := b.Store.SetRejected(pending.ChatID, pending.UserID); err != nil {
+		t.Fatalf("SetRejected() error = %v", err)
+	}
+	if _, err := b.Store.IncrWarningCount(pending.ChatID, pending.UserID); err != nil {
+		t.Fatalf("IncrWarningCount() error = %v", err)
+	}
+
+	if err := b.approveUser(pending.ChatID, pending.UserID); err != nil {
+		t.Fatalf("approveUser() error = %v", err)
+	}
+
+	verified, err := b.Store.IsVerified(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("IsVerified() error = %v", err)
+	}
+	if !verified {
+		t.Fatal("IsVerified() = false, want fallback approval to verify the user")
+	}
+}
+
 func TestRejectUserResolvesPendingAndDeletesMessages(t *testing.T) {
 	t.Parallel()
 
@@ -750,6 +792,44 @@ func TestOnVerifyWindowExpiredBansAfterMaxWarnings(t *testing.T) {
 	if deleteCount != 1 || banCount != 1 {
 		t.Fatalf("bot requests = %+v, want one deleteMessage and one banChatMember", requests)
 	}
+}
+
+func TestOnVerifyWindowExpiredStopsForUnmatchedAndVerifiedResults(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unmatched", func(t *testing.T) {
+		t.Parallel()
+
+		client := &recordingBotClient{}
+		b := newModerationFlowBot(t, &moderationFlowStoreStub{
+			resolve: storepkg.PendingResolutionResult{Matched: false},
+		})
+		b.Bot = newRecordingTelegramBot(client)
+
+		pending := storepkg.PendingVerification{ChatID: -100123, UserID: 42, Timestamp: 1, RandomToken: "token-a"}
+		b.onVerifyWindowExpired(b.Bot, pending)
+
+		if got := len(client.Requests()); got != 0 {
+			t.Fatalf("bot requests = %+v, want none for unmatched expiry", client.Requests())
+		}
+	})
+
+	t.Run("verified", func(t *testing.T) {
+		t.Parallel()
+
+		client := &recordingBotClient{}
+		b := newModerationFlowBot(t, &moderationFlowStoreStub{
+			resolve: storepkg.PendingResolutionResult{Matched: true, Verified: true},
+		})
+		b.Bot = newRecordingTelegramBot(client)
+
+		pending := storepkg.PendingVerification{ChatID: -100123, UserID: 42, Timestamp: 1, RandomToken: "token-a"}
+		b.onVerifyWindowExpired(b.Bot, pending)
+
+		if got := len(client.Requests()); got != 0 {
+			t.Fatalf("bot requests = %+v, want none for verified expiry", client.Requests())
+		}
+	})
 }
 
 func TestHandleVerificationSuccessSendsConfirmationAndClearsPending(t *testing.T) {
