@@ -672,15 +672,22 @@ func (b *Bot) rejectUser(chatID, userID int64) error {
 				deleteMessageIfExists(b.Bot, chatID, result.Pending.OriginalMessageID, "pending original after reject")
 				deleteMessageIfExists(b.Bot, userID, result.Pending.PrivateMessageID, "private verification message after reject")
 			}
+			banChatMember(b.Bot, chatID, userID, "manual reject")
 			return nil
 		}
 	}
 
-	return errors.Join(
+	err = errors.Join(
 		b.Store.SetRejected(chatID, userID),
 		b.Store.ResetWarningCount(chatID, userID),
 		b.Store.RemoveVerified(chatID, userID),
 	)
+	if err != nil {
+		return err
+	}
+
+	banChatMember(b.Bot, chatID, userID, "manual reject")
+	return nil
 }
 
 func (b *Bot) unrejectUser(chatID, userID int64) error {

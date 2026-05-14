@@ -27,7 +27,7 @@ resetverify_usage: 'Usage: /resetverify <uid>, or reply to the target user''s me
 resetverify_failed: ❌ Failed to clear the user's verification state in all chats
 resetverify_success: '✅ Cleared verification state, pending records, and warning counters for user <code>%d</code> in all chats'
 reject_failed: ❌ Failed to reject verification
-reject_result: '🚫 Rejected verification for user <code>%d</code>; future messages will be silently deleted'
+reject_result: '🚫 Rejected verification for user <code>%d</code> and banned them from this chat'
 unreject_failed: ❌ Failed to undo the rejection
 unreject_result: '✅ Removed the rejection for user <code>%d</code>; the user can go through verification again'
 stats_private: |
@@ -75,7 +75,7 @@ button_chat_mismatch: This button does not belong to the target chat
 callback_approve_failed: Approval failed. Please try again later
 callback_reject_failed: Rejection failed. Please try again later
 callback_approve_result: '✅ An admin approved verification for user <code>%d</code>'
-callback_reject_result: '🚫 An admin rejected verification for user <code>%d</code>; future messages will be silently deleted'
+callback_reject_result: '🚫 An admin rejected verification for user <code>%d</code> and banned them from this chat'
 callback_answer_approved: Approved
 callback_answer_rejected: Rejected
 verification_success: '✅ You have completed the human verification for group <code>%d</code>. You can speak normally now.'

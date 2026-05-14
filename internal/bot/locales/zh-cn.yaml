@@ -27,7 +27,7 @@ resetverify_usage: '用法: /resetverify <uid>，或回复目标用户消息后�
 resetverify_failed: ❌ 清空用户全部聊天室验证状态失败
 resetverify_success: '✅ 已清空用户 <code>%d</code> 在所有聊天室中的验证状态、待验证记录和警告计数'
 reject_failed: ❌ 拒绝验证失败
-reject_result: '🚫 已拒绝用户 <code>%d</code> 的验证，其消息将被静默删除'
+reject_result: '🚫 已拒绝用户 <code>%d</code> 的验证，并已将其封禁出本群'
 unreject_failed: ❌ 撤销拒绝失败
 unreject_result: '✅ 已撤销对用户 <code>%d</code> 的拒绝，该用户可重新走验证流程'
 stats_private: |
@@ -75,7 +75,7 @@ button_chat_mismatch: 按钮所属聊天与目标不匹配
 callback_approve_failed: 批准失败，请稍后重试
 callback_reject_failed: 拒绝失败，请稍后重试
 callback_approve_result: '✅ 已由管理员批准用户 <code>%d</code> 的验证'
-callback_reject_result: '🚫 已由管理员拒绝用户 <code>%d</code> 的验证，其消息将被静默删除'
+callback_reject_result: '🚫 已由管理员拒绝用户 <code>%d</code> 的验证，并已将其封禁出本群'
 callback_answer_approved: 已批准
 callback_answer_rejected: 已拒绝
 verification_success: '✅ 您已完成群组 <code>%d</code> 的人机验证，现在可以正常发言了。'
