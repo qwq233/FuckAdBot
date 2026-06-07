@@ -25,7 +25,15 @@ func (b *Bot) isBotAdmin(userID int64) bool {
 
 // isGroupAdmin checks if the user is a group admin/creator via Telegram API.
 func (b *Bot) isGroupAdmin(bot *gotgbot.Bot, chatID, userID int64) bool {
-	member, err := bot.GetChatMember(chatID, userID, nil)
+	var (
+		member gotgbot.ChatMember
+		err    error
+	)
+	if b != nil && b.getChatMember != nil {
+		member, err = b.getChatMember(bot, chatID, userID)
+	} else {
+		member, err = bot.GetChatMember(chatID, userID, nil)
+	}
 	if err != nil {
 		log.Printf("[bot] GetChatMember error: %v", err)
 		return false

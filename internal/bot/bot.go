@@ -33,6 +33,12 @@ type Bot struct {
 	cache    botCache
 	timersMu sync.Mutex
 	timers   map[timerKey][]*time.Timer
+
+	deleteMessage func(bot *gotgbot.Bot, chatID, messageID int64) error
+	banMember     func(bot *gotgbot.Bot, chatID, userID int64) error
+	sendMessage   func(bot *gotgbot.Bot, chatID int64, text string, opts *gotgbot.SendMessageOpts) (*gotgbot.Message, error)
+	getChatMember func(bot *gotgbot.Bot, chatID, userID int64) (gotgbot.ChatMember, error)
+	getChat       func(bot *gotgbot.Bot, userID int64) (*gotgbot.ChatFullInfo, error)
 }
 
 func New(cfg *config.Config, st store.Store, bl *blacklist.Blacklist, cs *captcha.Server) (*Bot, error) {
@@ -154,7 +160,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix(languagePreferenceCallbackPrefix), b.handleLanguagePreferenceCallback))
 
 	// Register message handler for group/supergroup messages (lower priority)
-	dispatcher.AddHandler(handlers.NewMessage(message.Supergroup, b.handleMessage))
+	dispatcher.AddHandler(handlers.NewMessage(message.Supergroup, b.handleMessage).SetAllowBot(true).SetAllowGuestMessage(true))
 
 	if err := b.restorePendingVerifications(b.Bot); err != nil {
 		return fmt.Errorf("restore pending verifications: %w", err)
@@ -167,7 +173,7 @@ func (b *Bot) Start(ctx context.Context) error {
 			RequestOpts: &gotgbot.RequestOpts{
 				Timeout: pollingRequestTimeout,
 			},
-			AllowedUpdates: []string{"message", "callback_query"},
+			AllowedUpdates: []string{gotgbot.UpdateTypeMessage, gotgbot.UpdateTypeGuestMessage, gotgbot.UpdateTypeCallbackQuery},
 		},
 	})
 	if err != nil {

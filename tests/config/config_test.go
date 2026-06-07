@@ -96,7 +96,7 @@ func TestReminderTTLUsesAtLeastVerifyWindow(t *testing.T) {
 	}
 }
 
-func TestOriginalMessageTTLDefaultsToOneMinute(t *testing.T) {
+func TestOriginalMessageTTLDefaultsTo150Seconds(t *testing.T) {
 	t.Parallel()
 
 	cfg := configpkg.ModerationConfig{
@@ -104,7 +104,7 @@ func TestOriginalMessageTTLDefaultsToOneMinute(t *testing.T) {
 		VerifyWindow:       "5m",
 	}
 
-	if got, want := cfg.GetOriginalMessageTTL(), time.Minute; got != want {
+	if got, want := cfg.GetOriginalMessageTTL(), 150*time.Second; got != want {
 		t.Fatalf("GetOriginalMessageTTL() = %v, want %v", got, want)
 	}
 }

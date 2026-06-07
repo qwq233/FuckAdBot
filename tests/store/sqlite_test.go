@@ -98,6 +98,8 @@ func TestSQLiteStorePendingVerificationRoundTrip(t *testing.T) {
 		OriginalMessageID: 8101,
 		MessageThreadID:   9001,
 		ReplyToMessageID:  5001,
+		RiskKind:          storepkg.PendingRiskGuestBot,
+		GuestBotUserIDs:   []int64{10001, 10002},
 	}
 
 	if err := store.SetPending(want); err != nil {
@@ -112,7 +114,7 @@ func TestSQLiteStorePendingVerificationRoundTrip(t *testing.T) {
 		t.Fatal("GetPending() = nil, want value")
 	}
 
-	if got.ChatID != want.ChatID || got.UserID != want.UserID || got.UserLanguage != want.UserLanguage || got.Timestamp != want.Timestamp || got.RandomToken != want.RandomToken || got.ReminderMessageID != want.ReminderMessageID || got.PrivateMessageID != want.PrivateMessageID || got.OriginalMessageID != want.OriginalMessageID || got.MessageThreadID != want.MessageThreadID || got.ReplyToMessageID != want.ReplyToMessageID {
+	if got.ChatID != want.ChatID || got.UserID != want.UserID || got.UserLanguage != want.UserLanguage || got.Timestamp != want.Timestamp || got.RandomToken != want.RandomToken || got.ReminderMessageID != want.ReminderMessageID || got.PrivateMessageID != want.PrivateMessageID || got.OriginalMessageID != want.OriginalMessageID || got.MessageThreadID != want.MessageThreadID || got.ReplyToMessageID != want.ReplyToMessageID || got.RiskKind != want.RiskKind || len(got.GuestBotUserIDs) != len(want.GuestBotUserIDs) || got.GuestBotUserIDs[0] != want.GuestBotUserIDs[0] || got.GuestBotUserIDs[1] != want.GuestBotUserIDs[1] {
 		t.Fatalf("GetPending() = %+v, want %+v", *got, want)
 	}
 
@@ -185,8 +187,8 @@ func TestSQLiteStoreSetsSchemaVersionToCurrentForFreshDB(t *testing.T) {
 		t.Fatalf("read user_version error = %v", err)
 	}
 
-	if version != 3 {
-		t.Fatalf("user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("user_version = %d, want 4", version)
 	}
 }
 
@@ -261,8 +263,8 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToCurrent(t *testing.T) {
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("migrated user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("migrated user_version = %d, want 4", version)
 	}
 
 	rows, err := rawDB.Query(`PRAGMA table_info(pending_verifications)`)
@@ -273,6 +275,8 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToCurrent(t *testing.T) {
 
 	foundOriginalMessageID := false
 	foundUserLanguage := false
+	foundRiskKind := false
+	foundGuestBotUserIDs := false
 	for rows.Next() {
 		var (
 			cid       int
@@ -291,6 +295,12 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToCurrent(t *testing.T) {
 		if name == "user_language" {
 			foundUserLanguage = true
 		}
+		if name == "risk_kind" {
+			foundRiskKind = true
+		}
+		if name == "guest_bot_user_ids" {
+			foundGuestBotUserIDs = true
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate table_info rows error = %v", err)
@@ -301,6 +311,12 @@ func TestSQLiteStoreMigratesVersionZeroDatabaseToCurrent(t *testing.T) {
 	}
 	if !foundUserLanguage {
 		t.Fatal("pending_verifications missing user_language column after migration")
+	}
+	if !foundRiskKind {
+		t.Fatal("pending_verifications missing risk_kind column after migration")
+	}
+	if !foundGuestBotUserIDs {
+		t.Fatal("pending_verifications missing guest_bot_user_ids column after migration")
 	}
 }
 
@@ -386,8 +402,8 @@ func TestSQLiteStoreMigratesVersionOneDatabaseToVersionTwoWithoutDataLoss(t *tes
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("migrated user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("migrated user_version = %d, want 4", version)
 	}
 
 	var userLanguage string
@@ -487,8 +503,8 @@ func TestSQLiteStoreMigratesVersionTwoDatabaseToVersionThree(t *testing.T) {
 	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read migrated user_version error = %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("migrated user_version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("migrated user_version = %d, want 4", version)
 	}
 
 	rows, err := rawDB.Query(`PRAGMA table_info(user_preferences)`)

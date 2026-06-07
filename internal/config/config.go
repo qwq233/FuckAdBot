@@ -103,7 +103,7 @@ func (c *ModerationConfig) GetReminderTTL() time.Duration {
 func (c *ModerationConfig) GetOriginalMessageTTL() time.Duration {
 	ttl, err := time.ParseDuration(c.OriginalMessageTTL)
 	if err != nil || ttl <= 0 {
-		ttl = time.Minute
+		ttl = 150 * time.Second
 	}
 
 	verifyWindow := c.GetVerifyWindow()
@@ -130,7 +130,7 @@ func Load(path string) (*Config, error) {
 			MaxWarnings:        3,
 			ReminderTTL:        30,
 			VerifyWindow:       "5m",
-			OriginalMessageTTL: "1m",
+			OriginalMessageTTL: "150s",
 		},
 		Store: StoreConfig{
 			Type:       "sqlite",

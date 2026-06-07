@@ -14,6 +14,8 @@ type PendingVerification struct {
 	OriginalMessageID int64
 	MessageThreadID   int64
 	ReplyToMessageID  int64
+	RiskKind          string
+	GuestBotUserIDs   []int64
 }
 
 type PendingAction string
@@ -23,6 +25,12 @@ const (
 	PendingActionReject  PendingAction = "reject"
 	PendingActionExpire  PendingAction = "expire"
 	PendingActionCancel  PendingAction = "cancel"
+)
+
+const (
+	PendingRiskTMe      = "tme"
+	PendingRiskInline   = "inline"
+	PendingRiskGuestBot = "guestbot"
 )
 
 type PendingResolutionResult struct {

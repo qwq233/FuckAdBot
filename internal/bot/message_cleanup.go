@@ -30,6 +30,19 @@ func deleteMessageIfExists(bot *gotgbot.Bot, chatID, messageID int64, label stri
 	}
 }
 
+func (b *Bot) deleteMessageIfExists(bot *gotgbot.Bot, chatID, messageID int64, label string) {
+	if bot == nil || chatID == 0 || messageID == 0 {
+		return
+	}
+	if b != nil && b.deleteMessage != nil {
+		if err := b.deleteMessage(bot, chatID, messageID); err != nil && !strings.Contains(strings.ToLower(err.Error()), "message to delete not found") {
+			log.Printf("[bot] delete %s message error: chat=%d message=%d err=%v", label, chatID, messageID, err)
+		}
+		return
+	}
+	deleteMessageIfExists(bot, chatID, messageID, label)
+}
+
 func banChatMember(bot *gotgbot.Bot, chatID, userID int64, label string) bool {
 	if bot == nil || chatID == 0 || userID == 0 {
 		return false
@@ -43,6 +56,20 @@ func banChatMember(bot *gotgbot.Bot, chatID, userID int64, label string) bool {
 	return true
 }
 
+func (b *Bot) banChatMember(bot *gotgbot.Bot, chatID, userID int64, label string) bool {
+	if bot == nil || chatID == 0 || userID == 0 {
+		return false
+	}
+	if b != nil && b.banMember != nil {
+		if err := b.banMember(bot, chatID, userID); err != nil {
+			log.Printf("[bot] ban %s user error: chat=%d user=%d err=%v", label, chatID, userID, err)
+			return false
+		}
+		return true
+	}
+	return banChatMember(bot, chatID, userID, label)
+}
+
 func sendMessageWithLog(bot *gotgbot.Bot, chatID int64, text string, opts *gotgbot.SendMessageOpts, label string) (*gotgbot.Message, error) {
 	msg, err := bot.SendMessage(chatID, text, opts)
 	if err != nil {
@@ -50,6 +77,18 @@ func sendMessageWithLog(bot *gotgbot.Bot, chatID int64, text string, opts *gotgb
 		return nil, err
 	}
 	return msg, nil
+}
+
+func (b *Bot) sendMessageWithLog(bot *gotgbot.Bot, chatID int64, text string, opts *gotgbot.SendMessageOpts, label string) (*gotgbot.Message, error) {
+	if b != nil && b.sendMessage != nil {
+		msg, err := b.sendMessage(bot, chatID, text, opts)
+		if err != nil {
+			log.Printf("[bot] send %s message error: chat=%d err=%v", label, chatID, err)
+			return nil, err
+		}
+		return msg, nil
+	}
+	return sendMessageWithLog(bot, chatID, text, opts, label)
 }
 
 func editReplyMarkupWithLog(bot *gotgbot.Bot, message *gotgbot.Message, opts *gotgbot.EditMessageReplyMarkupOpts, label string) {

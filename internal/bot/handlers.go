@@ -14,7 +14,7 @@ import (
 
 func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
-	if msg == nil || msg.From == nil {
+	if msg == nil {
 		return nil
 	}
 
@@ -23,8 +23,18 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
-	user := msg.From
 	chatID := msg.Chat.Id
+	risk := detectMessageRisk(msg)
+	user := moderationSubjectUser(msg)
+	if user == nil {
+		if risk.kind != "" {
+			b.deleteMessageIfExists(bot, chatID, msg.MessageId, "risk message without user")
+		}
+		return nil
+	}
+	if risk.kind == "" && user.IsBot {
+		return nil
+	}
 	userLanguage := b.requestLanguageForUser(user)
 
 	// --- Bot admins bypass all checks ---
@@ -39,8 +49,8 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 			return nil
 		}
 		log.Printf("[bot] blacklist hit: user=%d word=%q in chat=%d", user.Id, matched, chatID)
-		deleteMessageIfExists(bot, chatID, msg.MessageId, "blacklist hit")
-		banChatMember(bot, chatID, user.Id, "blacklist hit")
+		b.deleteMessageIfExists(bot, chatID, msg.MessageId, "blacklist hit")
+		b.banChatMember(bot, chatID, user.Id, "blacklist hit")
 		return nil
 	}
 
@@ -70,12 +80,16 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 	if rejected {
 		// Silently delete, no reminder, no warning increment
-		deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message")
+		b.deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message")
 		return nil
 	}
 
 	verifyWindow := b.Config.Moderation.GetVerifyWindow()
 	maxWarnings := b.Config.Moderation.MaxWarnings
+	effectiveMaxWarnings := maxWarnings
+	if risk.kind != "" {
+		effectiveMaxWarnings = 1
+	}
 
 	for attempt := 0; attempt < 3; attempt++ {
 		warnCount, err := b.Store.GetWarningCount(chatID, user.Id)
@@ -84,10 +98,10 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 			return nil
 		}
 
-		if warnCount >= maxWarnings {
-			log.Printf("[bot] banning user=%d in chat=%d: exceeded max warnings (%d)", user.Id, chatID, maxWarnings)
-			deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message before ban")
-			banChatMember(bot, chatID, user.Id, "warning limit exceeded")
+		if risk.kind == "" && warnCount >= effectiveMaxWarnings {
+			log.Printf("[bot] banning user=%d in chat=%d: exceeded max warnings (%d)", user.Id, chatID, effectiveMaxWarnings)
+			b.deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message before ban")
+			b.banChatMember(bot, chatID, user.Id, "warning limit exceeded")
 			return nil
 		}
 
@@ -108,6 +122,8 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 			OriginalMessageID: msg.MessageId,
 			MessageThreadID:   msg.MessageThreadId,
 			ReplyToMessageID:  msg.MessageId,
+			RiskKind:          risk.kind,
+			GuestBotUserIDs:   risk.guestBotUserIDs,
 		}
 
 		created, existing, err := b.Store.CreatePendingIfAbsent(pending)
@@ -124,21 +140,32 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 				rejected, err := b.Store.IsRejected(chatID, user.Id)
 				if err == nil && rejected {
-					deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message after pending race")
+					b.deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message after pending race")
 					return nil
 				}
 				continue
 			}
 
 			if existing.ExpireAt.After(time.Now().UTC()) {
-				deleteMessageIfExists(bot, chatID, msg.MessageId, "extra pending user message")
-				if err := b.deletePendingOriginalMessage(bot, existing, false); err != nil {
-					log.Printf("[bot] delete pending original message during active window error: %v", err)
+				if risk.kind != "" {
+					b.deleteMessageIfExists(bot, chatID, msg.MessageId, "risk message during active window")
+					if err := b.mergePendingRiskMetadata(*existing, risk); err != nil {
+						log.Printf("[bot] merge risk metadata during active window error: %v", err)
+					}
+				} else {
+					b.deleteMessageIfExists(bot, chatID, msg.MessageId, "extra pending user message")
+					if err := b.deletePendingOriginalMessage(bot, existing, false); err != nil {
+						log.Printf("[bot] delete pending original message during active window error: %v", err)
+					}
 				}
 				return nil
 			}
 
-			expired, err := b.Store.ResolvePendingByToken(existing.ChatID, existing.UserID, existing.Timestamp, existing.RandomToken, store.PendingActionExpire, maxWarnings)
+			existingMaxWarnings := maxWarnings
+			if existing.RiskKind != "" {
+				existingMaxWarnings = 1
+			}
+			expired, err := b.Store.ResolvePendingByToken(existing.ChatID, existing.UserID, existing.Timestamp, existing.RandomToken, store.PendingActionExpire, existingMaxWarnings)
 			if err != nil {
 				log.Printf("[bot] resolve expired pending during message handling error: %v", err)
 				return nil
@@ -153,23 +180,32 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 			}
 			if expired.ShouldBan {
 				log.Printf("[bot] auto-banning user=%d in chat=%d: %d warnings", user.Id, chatID, expired.WarningCount)
-				deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after stale expiry")
-				banChatMember(bot, chatID, user.Id, "expired pending")
+				b.deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after stale expiry")
+				b.banChatMember(bot, chatID, user.Id, "expired pending")
+				b.banGuestBotsForPending(bot, expired.Pending)
 				return nil
 			}
 			if expired.Verified {
 				return nil
 			}
 			if expired.Rejected {
-				deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message after stale expiry")
+				b.deleteMessageIfExists(bot, chatID, msg.MessageId, "rejected user message after stale expiry")
 				return nil
 			}
 			continue
 		}
+		if risk.kind != "" {
+			b.deleteMessageIfExists(bot, chatID, msg.MessageId, "risk verification original")
+			pending.OriginalMessageID = 0
+		}
 
 		maskedName := maskName(user.FirstName, userLanguage)
+		displayWarningCount := warnCount + 1
+		if risk.kind != "" {
+			displayWarningCount = 1
+		}
 		reminderText := appendDetectedLanguageLine(
-			tr(userLanguage, "reminder_text", user.Id, maskedName, warnCount+1, maxWarnings),
+			tr(userLanguage, "reminder_text", user.Id, maskedName, displayWarningCount, effectiveMaxWarnings),
 			userLanguage,
 			userLanguage,
 		)
@@ -185,12 +221,12 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 			sendOpts.MessageThreadId = msg.MessageThreadId
 		}
 
-		reminderMsg, err := sendMessageWithLog(bot, chatID, reminderText, sendOpts, "verification reminder")
+		reminderMsg, err := b.sendMessageWithLog(bot, chatID, reminderText, sendOpts, "verification reminder")
 		if err != nil {
-			if _, resolveErr := b.Store.ResolvePendingByToken(chatID, user.Id, pending.Timestamp, pending.RandomToken, store.PendingActionCancel, maxWarnings); resolveErr != nil {
+			if _, resolveErr := b.Store.ResolvePendingByToken(chatID, user.Id, pending.Timestamp, pending.RandomToken, store.PendingActionCancel, effectiveMaxWarnings); resolveErr != nil {
 				log.Printf("[bot] cancel pending after reminder send failure error: %v", resolveErr)
 			}
-			deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after reminder failure")
+			b.deleteMessageIfExists(bot, chatID, msg.MessageId, "unverified message after reminder failure")
 			return nil
 		}
 
@@ -198,14 +234,14 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		updated, err := b.Store.UpdatePendingMetadataByToken(pending)
 		if err != nil {
 			log.Printf("[bot] store.UpdatePendingMetadataByToken error: %v", err)
-			deleteMessageIfExists(bot, chatID, reminderMsg.MessageId, "verification reminder after pending update failure")
-			if _, resolveErr := b.Store.ResolvePendingByToken(chatID, user.Id, pending.Timestamp, pending.RandomToken, store.PendingActionCancel, maxWarnings); resolveErr != nil {
+			b.deleteMessageIfExists(bot, chatID, reminderMsg.MessageId, "verification reminder after pending update failure")
+			if _, resolveErr := b.Store.ResolvePendingByToken(chatID, user.Id, pending.Timestamp, pending.RandomToken, store.PendingActionCancel, effectiveMaxWarnings); resolveErr != nil {
 				log.Printf("[bot] cancel pending after metadata update failure error: %v", resolveErr)
 			}
 			return nil
 		}
 		if !updated {
-			deleteMessageIfExists(bot, chatID, reminderMsg.MessageId, "verification reminder after pending race")
+			b.deleteMessageIfExists(bot, chatID, reminderMsg.MessageId, "verification reminder after pending race")
 			return nil
 		}
 
@@ -216,7 +252,9 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 		reminderTTL := b.Config.Moderation.GetReminderTTL()
 		scheduleMessageDeletion(bot, chatID, reminderMsg.MessageId, reminderTTL, "verification reminder")
-		b.scheduleOriginalMessageDeletion(bot, pending)
+		if risk.kind == "" {
+			b.scheduleOriginalMessageDeletion(bot, pending)
+		}
 		b.scheduleUserTimer(chatID, user.Id, verifyWindow, func() {
 			b.onVerifyWindowExpired(bot, pending)
 		})
@@ -229,13 +267,26 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 // onVerifyWindowExpired is called when the verification window expires.
 func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, pending store.PendingVerification) {
+	currentPending, err := b.Store.GetPending(pending.ChatID, pending.UserID)
+	if err != nil {
+		log.Printf("[bot] read current pending before expiry error: %v", err)
+		return
+	}
+	if currentPending != nil && currentPending.Timestamp == pending.Timestamp && currentPending.RandomToken == pending.RandomToken {
+		pending = *currentPending
+	}
+
+	maxWarnings := b.Config.Moderation.MaxWarnings
+	if pending.RiskKind != "" {
+		maxWarnings = 1
+	}
 	result, err := b.Store.ResolvePendingByToken(
 		pending.ChatID,
 		pending.UserID,
 		pending.Timestamp,
 		pending.RandomToken,
 		store.PendingActionExpire,
-		b.Config.Moderation.MaxWarnings,
+		maxWarnings,
 	)
 	if err != nil {
 		log.Printf("[bot] resolve pending expiry error: %v", err)
@@ -256,11 +307,44 @@ func (b *Bot) onVerifyWindowExpired(bot *gotgbot.Bot, pending store.PendingVerif
 	}
 
 	log.Printf("[bot] verify window expired: user=%d chat=%d warnings=%d/%d",
-		pending.UserID, pending.ChatID, result.WarningCount, b.Config.Moderation.MaxWarnings)
+		pending.UserID, pending.ChatID, result.WarningCount, maxWarnings)
 
 	if result.ShouldBan {
 		log.Printf("[bot] auto-banning user=%d in chat=%d: %d warnings", pending.UserID, pending.ChatID, result.WarningCount)
-		banChatMember(bot, pending.ChatID, pending.UserID, "expired verification window")
+		b.banChatMember(bot, pending.ChatID, pending.UserID, "expired verification window")
+		b.banGuestBotsForPending(bot, result.Pending)
+	}
+}
+
+func (b *Bot) mergePendingRiskMetadata(pending store.PendingVerification, risk messageRisk) error {
+	if risk.kind == "" {
+		return nil
+	}
+	if pending.RiskKind == "" || risk.kind == store.PendingRiskGuestBot {
+		pending.RiskKind = risk.kind
+	}
+	for _, id := range risk.guestBotUserIDs {
+		pending.GuestBotUserIDs = appendUniqueInt64(pending.GuestBotUserIDs, id)
+	}
+	_, err := b.Store.UpdatePendingMetadataByToken(pending)
+	return err
+}
+
+func (b *Bot) markPendingOriginalDeleted(pending store.PendingVerification) error {
+	pending.OriginalMessageID = 0
+	_, err := b.Store.UpdatePendingMetadataByToken(pending)
+	return err
+}
+
+func (b *Bot) banGuestBotsForPending(bot *gotgbot.Bot, pending *store.PendingVerification) {
+	if pending == nil || len(pending.GuestBotUserIDs) == 0 {
+		return
+	}
+	for _, guestBotUserID := range pending.GuestBotUserIDs {
+		if guestBotUserID == pending.UserID {
+			continue
+		}
+		b.banChatMember(bot, pending.ChatID, guestBotUserID, "guestbot linked to expired verification")
 	}
 }
 
@@ -334,7 +418,7 @@ func (b *Bot) deletePendingOriginalMessage(bot *gotgbot.Bot, pending *store.Pend
 		return nil
 	}
 
-	deleteMessageIfExists(bot, targetPending.ChatID, targetPending.OriginalMessageID, "pending original")
+	b.deleteMessageIfExists(bot, targetPending.ChatID, targetPending.OriginalMessageID, "pending original")
 	if !shouldPersist {
 		return nil
 	}
@@ -370,6 +454,9 @@ func (b *Bot) matchUserAgainstBlacklist(bot *gotgbot.Bot, chatID int64, user *go
 	}
 
 	if bioChat := b.cachedUserChat(user.Id, func(userID int64) (*gotgbot.ChatFullInfo, error) {
+		if b.getChat != nil {
+			return b.getChat(bot, userID)
+		}
 		return bot.GetChat(userID, nil)
 	}); bioChat != nil && bioChat.Bio != "" {
 		return b.Blacklist.MatchWithGroup(chatID, checkText+" "+bioChat.Bio)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,7 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	dir := filepath.Dir(dbPath)
@@ -64,6 +65,8 @@ func (s *SQLiteStore) migrate() error {
 			original_message_id INTEGER NOT NULL DEFAULT 0,
 			message_thread_id INTEGER NOT NULL DEFAULT 0,
 			reply_to_message_id INTEGER NOT NULL DEFAULT 0,
+			risk_kind TEXT NOT NULL DEFAULT '',
+			guest_bot_user_ids TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (chat_id, user_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS warnings (
@@ -128,6 +131,11 @@ func (s *SQLiteStore) migrateSchemaVersion() error {
 				return err
 			}
 			version = 3
+		case 3:
+			if err := s.migrateToVersion4(); err != nil {
+				return err
+			}
+			version = 4
 		default:
 			return fmt.Errorf("unsupported database schema version: %d", version)
 		}
@@ -180,6 +188,21 @@ func (s *SQLiteStore) migrateToVersion3() error {
 	return nil
 }
 
+func (s *SQLiteStore) migrateToVersion4() error {
+	if err := s.addPendingVerificationColumns(map[string]string{
+		"risk_kind":          "TEXT NOT NULL DEFAULT ''",
+		"guest_bot_user_ids": "TEXT NOT NULL DEFAULT ''",
+	}); err != nil {
+		return fmt.Errorf("migrate database schema from version 3 to 4: %w", err)
+	}
+
+	if err := s.setSchemaVersion(4); err != nil {
+		return fmt.Errorf("set user_version to 4: %w", err)
+	}
+
+	return nil
+}
+
 func (s *SQLiteStore) ensureLegacyPendingVerificationColumns() error {
 	requiredColumns := map[string]string{
 		"token_timestamp":     "INTEGER NOT NULL DEFAULT 0",
@@ -188,6 +211,8 @@ func (s *SQLiteStore) ensureLegacyPendingVerificationColumns() error {
 		"private_message_id":  "INTEGER NOT NULL DEFAULT 0",
 		"message_thread_id":   "INTEGER NOT NULL DEFAULT 0",
 		"reply_to_message_id": "INTEGER NOT NULL DEFAULT 0",
+		"risk_kind":           "TEXT NOT NULL DEFAULT ''",
+		"guest_bot_user_ids":  "TEXT NOT NULL DEFAULT ''",
 	}
 
 	return s.addPendingVerificationColumns(requiredColumns)
@@ -205,6 +230,7 @@ type rowScanner interface {
 func scanPending(scanner rowScanner) (*PendingVerification, error) {
 	var pending PendingVerification
 	var expireAt string
+	var guestBotUserIDs string
 	err := scanner.Scan(
 		&pending.ChatID,
 		&pending.UserID,
@@ -217,6 +243,8 @@ func scanPending(scanner rowScanner) (*PendingVerification, error) {
 		&pending.OriginalMessageID,
 		&pending.MessageThreadID,
 		&pending.ReplyToMessageID,
+		&pending.RiskKind,
+		&guestBotUserIDs,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -228,6 +256,8 @@ func scanPending(scanner rowScanner) (*PendingVerification, error) {
 	if strings.TrimSpace(pending.UserLanguage) == "" {
 		pending.UserLanguage = "zh-cn"
 	}
+	pending.RiskKind = normalizePendingRiskKind(pending.RiskKind)
+	pending.GuestBotUserIDs = parseGuestBotUserIDs(guestBotUserIDs)
 
 	pending.ExpireAt, err = parseSQLiteTime(expireAt)
 	if err != nil {
@@ -235,6 +265,57 @@ func scanPending(scanner rowScanner) (*PendingVerification, error) {
 	}
 
 	return &pending, nil
+}
+
+func normalizePendingRiskKind(kind string) string {
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case PendingRiskTMe, PendingRiskInline, PendingRiskGuestBot:
+		return strings.TrimSpace(strings.ToLower(kind))
+	default:
+		return ""
+	}
+}
+
+func parseGuestBotUserIDs(value string) []int64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	seen := make(map[int64]struct{})
+	ids := make([]int64, 0)
+	for _, part := range strings.Split(value, ",") {
+		id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+		if err != nil || id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func formatGuestBotUserIDs(ids []int64) string {
+	if len(ids) == 0 {
+		return ""
+	}
+
+	seen := make(map[int64]struct{}, len(ids))
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		parts = append(parts, strconv.FormatInt(id, 10))
+	}
+	return strings.Join(parts, ",")
 }
 
 func (s *SQLiteStore) addPendingVerificationColumns(requiredColumns map[string]string) error {
@@ -412,7 +493,7 @@ func (s *SQLiteStore) HasActivePending(chatID, userID int64) (bool, error) {
 
 func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, error) {
 	pending, err := scanPending(s.db.QueryRow(
-		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id, risk_kind, guest_bot_user_ids
 		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID,
 	))
@@ -424,7 +505,7 @@ func (s *SQLiteStore) GetPending(chatID, userID int64) (*PendingVerification, er
 
 func (s *SQLiteStore) ListPendingVerifications() ([]PendingVerification, error) {
 	rows, err := s.db.Query(
-		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id, risk_kind, guest_bot_user_ids
 		 FROM pending_verifications
 		 ORDER BY expire_at ASC, chat_id ASC, user_id ASC`,
 	)
@@ -452,6 +533,7 @@ func (s *SQLiteStore) CreatePendingIfAbsent(pending PendingVerification) (bool, 
 	if strings.TrimSpace(pending.UserLanguage) == "" {
 		pending.UserLanguage = "zh-cn"
 	}
+	pending.RiskKind = normalizePendingRiskKind(pending.RiskKind)
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -460,7 +542,7 @@ func (s *SQLiteStore) CreatePendingIfAbsent(pending PendingVerification) (bool, 
 	defer tx.Rollback()
 
 	existing, err := scanPending(tx.QueryRow(
-		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id, risk_kind, guest_bot_user_ids
 		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
 		pending.ChatID, pending.UserID,
 	))
@@ -515,8 +597,10 @@ func (s *SQLiteStore) CreatePendingIfAbsent(pending PendingVerification) (bool, 
 			private_message_id,
 			original_message_id,
 			message_thread_id,
-			reply_to_message_id
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			reply_to_message_id,
+			risk_kind,
+			guest_bot_user_ids
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pending.ChatID,
 		pending.UserID,
 		pending.UserLanguage,
@@ -528,6 +612,8 @@ func (s *SQLiteStore) CreatePendingIfAbsent(pending PendingVerification) (bool, 
 		pending.OriginalMessageID,
 		pending.MessageThreadID,
 		pending.ReplyToMessageID,
+		pending.RiskKind,
+		formatGuestBotUserIDs(pending.GuestBotUserIDs),
 	); err != nil {
 		return false, nil, err
 	}
@@ -542,6 +628,7 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 	if strings.TrimSpace(pending.UserLanguage) == "" {
 		pending.UserLanguage = "zh-cn"
 	}
+	pending.RiskKind = normalizePendingRiskKind(pending.RiskKind)
 
 	_, err := s.db.Exec(
 		`INSERT INTO pending_verifications (
@@ -555,8 +642,10 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 			private_message_id,
 			original_message_id,
 			message_thread_id,
-			reply_to_message_id
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			reply_to_message_id,
+			risk_kind,
+			guest_bot_user_ids
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(chat_id, user_id) DO UPDATE SET
 		 	user_language = excluded.user_language,
 		 	token_timestamp = excluded.token_timestamp,
@@ -566,7 +655,9 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 		 	private_message_id = excluded.private_message_id,
 		 	original_message_id = excluded.original_message_id,
 		 	message_thread_id = excluded.message_thread_id,
-		 	reply_to_message_id = excluded.reply_to_message_id`,
+		 	reply_to_message_id = excluded.reply_to_message_id,
+		 	risk_kind = excluded.risk_kind,
+		 	guest_bot_user_ids = excluded.guest_bot_user_ids`,
 		pending.ChatID,
 		pending.UserID,
 		pending.UserLanguage,
@@ -578,6 +669,8 @@ func (s *SQLiteStore) SetPending(pending PendingVerification) error {
 		pending.OriginalMessageID,
 		pending.MessageThreadID,
 		pending.ReplyToMessageID,
+		pending.RiskKind,
+		formatGuestBotUserIDs(pending.GuestBotUserIDs),
 	)
 	return err
 }
@@ -586,6 +679,7 @@ func (s *SQLiteStore) UpdatePendingMetadataByToken(pending PendingVerification) 
 	if strings.TrimSpace(pending.UserLanguage) == "" {
 		pending.UserLanguage = "zh-cn"
 	}
+	pending.RiskKind = normalizePendingRiskKind(pending.RiskKind)
 
 	result, err := s.db.Exec(
 		`UPDATE pending_verifications
@@ -595,7 +689,9 @@ func (s *SQLiteStore) UpdatePendingMetadataByToken(pending PendingVerification) 
 		     private_message_id = ?,
 		     original_message_id = ?,
 		     message_thread_id = ?,
-		     reply_to_message_id = ?
+		     reply_to_message_id = ?,
+		     risk_kind = ?,
+		     guest_bot_user_ids = ?
 		 WHERE chat_id = ?
 		   AND user_id = ?
 		   AND token_timestamp = ?
@@ -607,6 +703,8 @@ func (s *SQLiteStore) UpdatePendingMetadataByToken(pending PendingVerification) 
 		pending.OriginalMessageID,
 		pending.MessageThreadID,
 		pending.ReplyToMessageID,
+		pending.RiskKind,
+		formatGuestBotUserIDs(pending.GuestBotUserIDs),
 		pending.ChatID,
 		pending.UserID,
 		pending.Timestamp,
@@ -642,7 +740,7 @@ func (s *SQLiteStore) ResolvePendingByToken(chatID, userID int64, timestamp int6
 	defer tx.Rollback()
 
 	pending, err := scanPending(tx.QueryRow(
-		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id
+		`SELECT chat_id, user_id, user_language, token_timestamp, token_rand, expire_at, reminder_message_id, private_message_id, original_message_id, message_thread_id, reply_to_message_id, risk_kind, guest_bot_user_ids
 		 FROM pending_verifications WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID,
 	))
