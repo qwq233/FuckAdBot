@@ -220,6 +220,140 @@ func TestGuestBotMessageDuringPendingIsDeletedAndLinked(t *testing.T) {
 	}
 }
 
+func TestFreshGuestBotRiskTimerBansCallerAndGuestBot(t *testing.T) {
+	b, _, deleted, banned := newRiskTestBot(t)
+
+	msg := &gotgbot.Message{
+		MessageId:          89,
+		From:               &gotgbot.User{Id: 300, IsBot: true},
+		GuestBotCallerUser: &gotgbot.User{Id: 42, FirstName: "Risk"},
+		Chat:               gotgbot.Chat{Id: -100123, Type: "supergroup"},
+		Text:               "guestbot response",
+	}
+
+	if err := b.handleMessage(b.Bot, &ext.Context{EffectiveMessage: msg}); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+
+	if len(*deleted) != 1 || (*deleted)[0] != 89 {
+		t.Fatalf("deleted messages = %v, want [89]", *deleted)
+	}
+	if len(*banned) != 0 {
+		t.Fatalf("banned users = %v, want none before timer expiry", *banned)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(*banned) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if len(*banned) != 2 || (*banned)[0] != 42 || (*banned)[1] != 300 {
+		t.Fatalf("banned users after timer expiry = %v, want [42 300]", *banned)
+	}
+}
+
+func TestGuestBotMessageLinksToCallerPendingAcrossChats(t *testing.T) {
+	b, st, deleted, banned := newRiskTestBot(t)
+
+	pending := storepkg.PendingVerification{
+		ChatID:       -100123,
+		UserID:       42,
+		UserLanguage: "en",
+		Timestamp:    time.Now().UTC().Unix(),
+		RandomToken:  "cross1",
+		ExpireAt:     time.Now().UTC().Add(time.Minute),
+	}
+	if err := st.SetPending(pending); err != nil {
+		t.Fatalf("SetPending() error = %v", err)
+	}
+
+	msg := &gotgbot.Message{
+		MessageId:          95,
+		From:               &gotgbot.User{Id: 300, IsBot: true},
+		GuestBotCallerUser: &gotgbot.User{Id: 42, FirstName: "Risk"},
+		Chat:               gotgbot.Chat{Id: -100999, Type: "supergroup"},
+		Text:               "guestbot response",
+	}
+
+	if err := b.handleMessage(b.Bot, &ext.Context{EffectiveMessage: msg}); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+
+	if len(*deleted) != 1 || (*deleted)[0] != 95 {
+		t.Fatalf("deleted messages = %v, want [95]", *deleted)
+	}
+	if len(*banned) != 0 {
+		t.Fatalf("banned users = %v, want none before caller pending expiry", *banned)
+	}
+
+	guestChatPending, err := st.GetPending(msg.Chat.Id, msg.GuestBotCallerUser.Id)
+	if err != nil {
+		t.Fatalf("GetPending(guest chat) error = %v", err)
+	}
+	if guestChatPending != nil {
+		t.Fatalf("GetPending(guest chat) = %+v, want no duplicate pending", *guestChatPending)
+	}
+
+	callerPending, err := st.GetPending(pending.ChatID, pending.UserID)
+	if err != nil {
+		t.Fatalf("GetPending(caller pending) error = %v", err)
+	}
+	if callerPending == nil || callerPending.RiskKind != storepkg.PendingRiskGuestBot || len(callerPending.GuestBotUserIDs) != 1 || callerPending.GuestBotUserIDs[0] != 300 {
+		t.Fatalf("caller pending = %+v, want original pending upgraded to linked guestbot risk", callerPending)
+	}
+
+	b.onVerifyWindowExpired(b.Bot, pending)
+
+	if len(*banned) != 2 || (*banned)[0] != 42 || (*banned)[1] != 300 {
+		t.Fatalf("banned users after caller pending expiry = %v, want [42 300]", *banned)
+	}
+}
+
+func TestGuestBotCallerChatUsesReplyUserWhenAvailable(t *testing.T) {
+	b, st, deleted, banned := newRiskTestBot(t)
+
+	msg := &gotgbot.Message{
+		MessageId:          96,
+		From:               &gotgbot.User{Id: 300, IsBot: true},
+		GuestBotCallerChat: &gotgbot.Chat{Id: -100999, Type: "supergroup", Title: "Caller Chat"},
+		ReplyToMessage: &gotgbot.Message{
+			MessageId: 12,
+			From:      &gotgbot.User{Id: 42, FirstName: "Risk"},
+			Chat:      gotgbot.Chat{Id: -100123, Type: "supergroup"},
+		},
+		Chat: gotgbot.Chat{Id: -100123, Type: "supergroup"},
+		Text: "guestbot response",
+	}
+
+	if err := b.handleMessage(b.Bot, &ext.Context{EffectiveMessage: msg}); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+
+	if len(*deleted) != 1 || (*deleted)[0] != 96 {
+		t.Fatalf("deleted messages = %v, want [96]", *deleted)
+	}
+	if len(*banned) != 0 {
+		t.Fatalf("banned users = %v, want none before expiry", *banned)
+	}
+
+	pending, err := st.GetPending(msg.Chat.Id, msg.ReplyToMessage.From.Id)
+	if err != nil {
+		t.Fatalf("GetPending() error = %v", err)
+	}
+	if pending == nil || pending.UserID != 42 || pending.RiskKind != storepkg.PendingRiskGuestBot || len(pending.GuestBotUserIDs) != 1 || pending.GuestBotUserIDs[0] != 300 {
+		t.Fatalf("pending = %+v, want reply user pending linked to guestbot", pending)
+	}
+
+	b.onVerifyWindowExpired(b.Bot, *pending)
+
+	if len(*banned) != 2 || (*banned)[0] != 42 || (*banned)[1] != 300 {
+		t.Fatalf("banned users after expiry = %v, want [42 300]", *banned)
+	}
+}
+
 func TestRiskUpgradeDuringPendingExpiresWithOneChance(t *testing.T) {
 	b, st, _, banned := newRiskTestBot(t)
 
@@ -399,5 +533,49 @@ func TestPlainBotMessageIsIgnored(t *testing.T) {
 	}
 	if pending != nil {
 		t.Fatalf("GetPending() = %+v, want no pending for plain bot message", *pending)
+	}
+}
+
+func TestPlainReplyModeratesSenderNotRepliedUser(t *testing.T) {
+	b, st, _, banned := newRiskTestBot(t)
+
+	if err := st.SetVerified(-100123, 99); err != nil {
+		t.Fatalf("SetVerified() error = %v", err)
+	}
+
+	msg := &gotgbot.Message{
+		MessageId: 97,
+		From:      &gotgbot.User{Id: 42, FirstName: "Sender"},
+		Chat:      gotgbot.Chat{Id: -100123, Type: "supergroup"},
+		Text:      "plain reply",
+		ReplyToMessage: &gotgbot.Message{
+			MessageId: 12,
+			From:      &gotgbot.User{Id: 99, FirstName: "Verified"},
+			Chat:      gotgbot.Chat{Id: -100123, Type: "supergroup"},
+		},
+	}
+
+	if err := b.handleMessage(b.Bot, &ext.Context{EffectiveMessage: msg}); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+
+	if len(*banned) != 0 {
+		t.Fatalf("banned users = %v, want none before sender verification expiry", *banned)
+	}
+
+	senderPending, err := st.GetPending(msg.Chat.Id, msg.From.Id)
+	if err != nil {
+		t.Fatalf("GetPending(sender) error = %v", err)
+	}
+	if senderPending == nil {
+		t.Fatal("GetPending(sender) = nil, want pending for actual sender")
+	}
+
+	repliedPending, err := st.GetPending(msg.Chat.Id, msg.ReplyToMessage.From.Id)
+	if err != nil {
+		t.Fatalf("GetPending(replied user) error = %v", err)
+	}
+	if repliedPending != nil {
+		t.Fatalf("GetPending(replied user) = %+v, want no pending for replied user", *repliedPending)
 	}
 }

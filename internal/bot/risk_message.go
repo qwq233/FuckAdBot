@@ -39,10 +39,23 @@ func moderationSubjectUser(msg *gotgbot.Message) *gotgbot.User {
 	if msg == nil {
 		return nil
 	}
+	if user := guestBotCallerUser(msg); user != nil {
+		return user
+	}
+	return msg.From
+}
+
+func guestBotCallerUser(msg *gotgbot.Message) *gotgbot.User {
+	if msg == nil {
+		return nil
+	}
 	if msg.GuestBotCallerUser != nil {
 		return msg.GuestBotCallerUser
 	}
-	return msg.From
+	if msg.GuestBotCallerChat != nil && msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil && !msg.ReplyToMessage.From.IsBot {
+		return msg.ReplyToMessage.From
+	}
+	return nil
 }
 
 func firstRiskKind(current, next string) string {

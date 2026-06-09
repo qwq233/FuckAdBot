@@ -54,6 +54,21 @@ func (b *Bot) handleMessage(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 
+	if risk.kind == store.PendingRiskGuestBot {
+		activePending, err := b.activePendingForGuestBotCaller(chatID, user.Id)
+		if err != nil {
+			log.Printf("[bot] find active pending for guestbot caller error: %v", err)
+			return nil
+		}
+		if activePending != nil {
+			b.deleteMessageIfExists(bot, chatID, msg.MessageId, "guestbot message for active pending caller")
+			if err := b.mergePendingRiskMetadata(*activePending, risk); err != nil {
+				log.Printf("[bot] merge guestbot risk metadata for active caller pending error: %v", err)
+			}
+			return nil
+		}
+	}
+
 	// --- Verification status check ---
 	verified, err := b.Store.IsVerified(chatID, user.Id)
 	if err != nil {
@@ -328,6 +343,33 @@ func (b *Bot) mergePendingRiskMetadata(pending store.PendingVerification, risk m
 	}
 	_, err := b.Store.UpdatePendingMetadataByToken(pending)
 	return err
+}
+
+func (b *Bot) activePendingForGuestBotCaller(messageChatID, userID int64) (*store.PendingVerification, error) {
+	now := time.Now().UTC()
+	currentChatPending, err := b.Store.GetPending(messageChatID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if currentChatPending != nil && currentChatPending.ExpireAt.After(now) {
+		return currentChatPending, nil
+	}
+
+	pendingVerifications, err := b.Store.ListPendingVerifications()
+	if err != nil {
+		return nil, err
+	}
+	var matchedPending *store.PendingVerification
+	for i := range pendingVerifications {
+		pending := &pendingVerifications[i]
+		if pending.UserID == userID && pending.ExpireAt.After(now) {
+			if matchedPending != nil {
+				return nil, nil
+			}
+			matchedPending = pending
+		}
+	}
+	return matchedPending, nil
 }
 
 func (b *Bot) markPendingOriginalDeleted(pending store.PendingVerification) error {
